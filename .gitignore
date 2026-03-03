@@ -1,0 +1,7 @@
+*.pth
+*.tar
+results
+testsets
+_djscc/ckpt/*.tar
+*.pt
+__pyc*
