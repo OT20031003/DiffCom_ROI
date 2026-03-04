@@ -13,11 +13,11 @@ from _djscc.standalone_utils import (
     ImportanceImageDataset,
     RunningAverages,
     batch_psnr,
-    effective_alpha,
+    pearson_corr_loss_map,
+    reconstruction_loss,
     resolve_split_dirs,
     sample_snr_db,
     set_seed,
-    weighted_recon_loss,
 )
 from channel.channel import Channel
 
@@ -42,19 +42,11 @@ def parse_args():
     parser.add_argument("--channel-type", type=str, default="awgn", choices=["awgn", "rayleigh"])
     parser.add_argument("--snr", type=float, default=None, help="Fixed training SNR in dB.")
     parser.add_argument("--snr-range", type=float, nargs=2, default=None, metavar=("LOW", "HIGH"))
-    parser.add_argument("--alpha", type=float, default=2.0, help="Importance-region loss weight.")
-    parser.add_argument("--beta", type=float, default=1.0, help="Background-region loss weight.")
     parser.add_argument(
-        "--alpha-low-snr-threshold",
+        "--lambda-corr",
         type=float,
-        default=None,
-        help="If set, increase alpha below this SNR threshold.",
-    )
-    parser.add_argument(
-        "--alpha-low-snr-gain",
-        type=float,
-        default=0.0,
-        help="Gain for alpha boost when SNR is below threshold.",
+        default=0.01,
+        help="Weight of Pearson-correlation regularization term.",
     )
     parser.add_argument("--loss-type", type=str, default="l1", choices=["l1", "mse"])
     parser.add_argument("--save-dir", type=str, default="results/djscc_train")
@@ -119,23 +111,14 @@ def load_model_weights(model: nn.Module, ckpt_path: str, device: torch.device, s
     return ckpt_obj, load_result
 
 
-def pearson_corr(a: torch.Tensor, b: torch.Tensor, eps: float = 1e-8) -> float:
-    a = a.reshape(-1).float()
-    b = b.reshape(-1).float()
-    a = a - a.mean()
-    b = b - b.mean()
-    denom = torch.sqrt(torch.sum(a * a) * torch.sum(b * b)) + eps
-    if denom.item() <= eps:
-        return 0.0
-    return float((torch.sum(a * b) / denom).item())
-
-
 def run_epoch(model, loader, optimizer, device, args, rng, train: bool, epoch: int):
     model.train(mode=train)
     averages = RunningAverages()
     use_mse = args.loss_type == "mse"
-    corr_sum = 0.0
-    corr_count = 0
+    sample_count = 0
+    recon_loss_sum = 0.0
+    corr_loss_sum = 0.0
+    total_loss_sum = 0.0
     mode_name = "train" if train else "val"
     pbar = tqdm(
         loader,
@@ -150,12 +133,6 @@ def run_epoch(model, loader, optimizer, device, args, rng, train: bool, epoch: i
         importance = importance.to(device, non_blocking=True)
 
         snr_db = sample_snr_db(args.snr, args.snr_range, rng)
-        alpha_eff = effective_alpha(
-            args.alpha,
-            snr_db,
-            low_snr_threshold=args.alpha_low_snr_threshold,
-            low_snr_gain=args.alpha_low_snr_gain,
-        )
 
         with torch.set_grad_enabled(train):
             # Importance is injected encoder-side only. Decoder receives latent + SNR, not importance.
@@ -164,46 +141,46 @@ def run_epoch(model, loader, optimizer, device, args, rng, train: bool, epoch: i
                 given_SNR=snr_db,
                 importance_map=None if args.disable_importance_gating else importance,
             )
-            loss, l_roi, l_bg = weighted_recon_loss(
-                images, recon, importance, alpha=alpha_eff, beta=args.beta, use_mse=use_mse
-            )
+            recon_loss = reconstruction_loss(images, recon, use_mse=use_mse)
+            err_map = torch.mean(torch.abs(images - recon), dim=1, keepdim=True)
+            corr_loss = pearson_corr_loss_map(importance, err_map)
+            total_loss = recon_loss + args.lambda_corr * corr_loss
             if train:
                 optimizer.zero_grad(set_to_none=True)
-                loss.backward()
+                total_loss.backward()
                 optimizer.step()
-
-        err_map = torch.mean(torch.abs(images - recon), dim=1, keepdim=True)
-        batch_corr_sum = 0.0
-        batch_corr_count = 0
-        with torch.no_grad():
-            for i in range(images.size(0)):
-                corr_value = pearson_corr(importance[i], err_map[i])
-                corr_sum += corr_value
-                corr_count += 1
-                batch_corr_sum += corr_value
-                batch_corr_count += 1
 
         psnr_value = batch_psnr(images, recon).mean().item()
         batch_size = images.size(0)
+        sample_count += batch_size
+        recon_loss_sum += float(recon_loss.detach().item()) * batch_size
+        corr_loss_sum += float(corr_loss.detach().item()) * batch_size
+        total_loss_sum += float(total_loss.detach().item()) * batch_size
+
         averages.update(
-            loss=float(loss.item()),
-            l_roi=float(l_roi.item()),
-            l_bg=float(l_bg.item()),
+            loss=float(total_loss.detach().item()),
+            recon_loss=float(recon_loss.detach().item()),
             psnr=psnr_value,
             n=batch_size,
         )
 
         current = averages.compute()
+        running_recon_loss = recon_loss_sum / max(sample_count, 1)
+        running_corr_loss = corr_loss_sum / max(sample_count, 1)
+        running_total_loss = total_loss_sum / max(sample_count, 1)
         pbar.set_postfix(
-            loss=f"{current['loss']:.4f}",
+            recon=f"{running_recon_loss:.4f}",
+            corr_loss=f"{running_corr_loss:.4f}",
+            total=f"{running_total_loss:.4f}",
             psnr=f"{current['psnr']:.2f}",
-            corr=f"{(corr_sum / max(corr_count, 1)):.4f}",
-            corr_step=f"{(batch_corr_sum / max(batch_corr_count, 1)):.4f}",
             snr=f"{snr_db:.2f}dB",
         )
 
     result = averages.compute()
-    result["corr"] = corr_sum / max(corr_count, 1)
+    result["corr"] = corr_loss_sum / max(sample_count, 1)
+    result["recon_loss"] = recon_loss_sum / max(sample_count, 1)
+    result["corr_loss"] = corr_loss_sum / max(sample_count, 1)
+    result["total_loss"] = total_loss_sum / max(sample_count, 1)
     return result
 
 
@@ -284,8 +261,8 @@ def main():
     for epoch in range(start_epoch, args.epochs + 1):
         train_stats = run_epoch(model, train_loader, optimizer, device, args, rng, train=True, epoch=epoch)
         print(
-            f"[epoch {epoch}] train loss={train_stats['loss']:.6f} "
-            f"l_roi={train_stats['l_roi']:.6f} l_bg={train_stats['l_bg']:.6f} "
+            f"[epoch {epoch}] train recon_loss={train_stats['recon_loss']:.6f} "
+            f"corr_loss={train_stats['corr_loss']:.6f} total_loss={train_stats['total_loss']:.6f} "
             f"psnr={train_stats['psnr']:.2f} corr={train_stats['corr']:.4f}"
         )
 
@@ -294,8 +271,8 @@ def main():
             with torch.no_grad():
                 val_stats = run_epoch(model, val_loader, optimizer, device, args, rng, train=False, epoch=epoch)
             print(
-                f"[epoch {epoch}] val   loss={val_stats['loss']:.6f} "
-                f"l_roi={val_stats['l_roi']:.6f} l_bg={val_stats['l_bg']:.6f} "
+                f"[epoch {epoch}] val   recon_loss={val_stats['recon_loss']:.6f} "
+                f"corr_loss={val_stats['corr_loss']:.6f} total_loss={val_stats['total_loss']:.6f} "
                 f"psnr={val_stats['psnr']:.2f} corr={val_stats['corr']:.4f}"
             )
 

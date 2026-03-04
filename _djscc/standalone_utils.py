@@ -118,36 +118,16 @@ def sample_snr_db(
     return 10.0
 
 
-def effective_alpha(
-    base_alpha: float,
-    snr_db: float,
-    low_snr_threshold: Optional[float] = None,
-    low_snr_gain: float = 0.0,
-) -> float:
-    if low_snr_threshold is None or low_snr_gain <= 0:
-        return float(base_alpha)
-    delta = max(0.0, float(low_snr_threshold) - float(snr_db))
-    norm = max(abs(float(low_snr_threshold)), 1.0)
-    return float(base_alpha) * (1.0 + low_snr_gain * delta / norm)
-
-
-def weighted_recon_loss(
+def reconstruction_loss(
     x: torch.Tensor,
     x_hat: torch.Tensor,
-    importance: torch.Tensor,
-    alpha: float,
-    beta: float,
     use_mse: bool = False,
-):
+) -> torch.Tensor:
     if use_mse:
         diff = (x - x_hat) ** 2
     else:
         diff = (x - x_hat).abs()
-    importance = importance.clamp(0.0, 1.0)
-    l_roi = (importance * diff).mean()
-    l_bg = ((1.0 - importance) * diff).mean()
-    total = alpha * l_roi + beta * l_bg
-    return total, l_roi, l_bg
+    return diff.mean()
 
 
 def batch_psnr(x: torch.Tensor, x_hat: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
@@ -155,18 +135,41 @@ def batch_psnr(x: torch.Tensor, x_hat: torch.Tensor, eps: float = 1e-8) -> torch
     return 10.0 * torch.log10(1.0 / (mse + eps))
 
 
+def pearson_corr_loss_map(
+    importance: torch.Tensor,
+    err_map: torch.Tensor,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """
+    Differentiable batch-mean Pearson correlation between importance and error maps.
+    Inputs are expected in shape [B, 1, H, W].
+    Returns a scalar tensor.
+    """
+    if importance.shape != err_map.shape:
+        raise ValueError(f"Shape mismatch: importance {importance.shape} vs err_map {err_map.shape}")
+
+    imp = importance.reshape(importance.size(0), -1).float()
+    err = err_map.reshape(err_map.size(0), -1).float()
+
+    imp = imp - imp.mean(dim=1, keepdim=True)
+    err = err - err.mean(dim=1, keepdim=True)
+
+    numerator = torch.sum(imp * err, dim=1)
+    denom = torch.sqrt(torch.sum(imp * imp, dim=1) * torch.sum(err * err, dim=1) + eps)
+    corr = numerator / (denom + eps)
+    return corr.mean()
+
+
 @dataclass
 class RunningAverages:
     loss: float = 0.0
-    l_roi: float = 0.0
-    l_bg: float = 0.0
+    recon_loss: float = 0.0
     psnr: float = 0.0
     count: int = 0
 
-    def update(self, loss: float, l_roi: float, l_bg: float, psnr: float, n: int) -> None:
+    def update(self, loss: float, recon_loss: float, psnr: float, n: int) -> None:
         self.loss += loss * n
-        self.l_roi += l_roi * n
-        self.l_bg += l_bg * n
+        self.recon_loss += recon_loss * n
         self.psnr += psnr * n
         self.count += n
 
@@ -174,7 +177,6 @@ class RunningAverages:
         denom = max(self.count, 1)
         return {
             "loss": self.loss / denom,
-            "l_roi": self.l_roi / denom,
-            "l_bg": self.l_bg / denom,
+            "recon_loss": self.recon_loss / denom,
             "psnr": self.psnr / denom,
         }

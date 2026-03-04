@@ -1,84 +1,233 @@
-![Python >=3.8](https://img.shields.io/badge/Python->=3.7-yellow.svg)
-![PyTorch >=1.9](https://img.shields.io/badge/PyTorch->=1.7-blue.svg)
+![Python >=3.8](https://img.shields.io/badge/Python->=3.8-yellow.svg)
+![PyTorch >=1.9](https://img.shields.io/badge/PyTorch->=1.9-blue.svg)
 
-# DiffCom: Channel Received Signal is a Natural Condition to Guide Diffusion Posterior Sampling [[pdf]](https://arxiv.org/abs/2406.07390)
+# DiffCom / ADJSCC 実装ガイド（日本語）
 
-Here is the implementation of the
-paper "[DiffCom: Channel Received Signal is a Natural Condition to Guide Diffusion Posterior Sampling](https://semcomm.github.io/DiffCom/)".
+このリポジトリは、無線画像伝送向けの DiffCom 系コードと、ADJSCC の単体学習・評価コードを含みます。
 
-Project website: [https://semcomm.github.io/DiffCom/](https://semcomm.github.io/DiffCom/)
+- DiffCom 推論: `main_diffcom.py`（`configs/diffcom.yaml` を使用）
+- ADJSCC 学習: `train_djscc.py`
+- ADJSCC 評価: `test_djscc.py`
+- 合成重要度マップ生成: `generate_ffhq_importance_maps.py`
 
-## Abstract
+## 1. ADJSCC 学習で使う損失関数
 
-End-to-end visual communication systems typically optimize a trade-off between channel bandwidth costs and signal-level
-distortion metrics. However, under challenging physical conditions, this traditional coding and transmission paradigm
-often results in unrealistic reconstructions with perceptible blurring and aliasing artifacts, despite the inclusion of
-perceptual or adversarial losses for optimizing. This issue primarily stems from the receiver’s limited knowledge about
-the underlying data manifold and the use of deterministic decoding mechanisms. 
-To address these limitations, this paper
-introduces DiffCom, a novel end-to-end generative communication paradigm that utilizes off-the-shelf generative priors
-and probabilistic diffusion models for decoding, thereby improving perceptual quality without heavily relying on
-bandwidth costs and received signal quality. Unlike traditional systems that rely on deterministic decoders optimized
-solely for distortion metrics, our DiffCom leverages raw channel-received signal as a fine-grained condition to guide
-stochastic posterior sampling. Our approach ensures that reconstructions remain on the manifold of real data with a
-novel confirming constraint, enhancing the robustness and reliability of the generated outcomes.
+現行の `train_djscc.py` では、前景/背景の分離重み（`alpha`, `beta`）は使わず、
+再構成誤差と相関正則化の和を最小化します。
 
-## Overview of the DiffCom system architecture
+再構成誤差（`--loss-type l1` または `mse`）:
 
-<img src="imgs/Fig_framework.png"  style="width: 70%;" />
+$$
+\mathcal{L}_{\mathrm{recon}} =
+\begin{cases}
+\frac{1}{N} \sum_{i=1}^{N} |x_i - \hat{x}_i| & (\text{L1}) \\
+\frac{1}{N} \sum_{i=1}^{N} (x_i - \hat{x}_i)^2 & (\text{MSE})
+\end{cases}
+$$
 
-## RDP curves on [FFHQ](https://github.com/NVlabs/ffhq-dataset) testset
+重要度マップ $I$ と誤差マップ $E$（実装では RGB 平均の絶対誤差）とのピアソン相関:
 
-<img src="imgs/Fig_RDP.png"  style="width: 88%;" />
+$$
+\mathrm{corr}(I, E) =
+\frac{\sum (I - \bar{I})(E - \bar{E})}
+{\sqrt{\sum (I - \bar{I})^2 \sum (E - \bar{E})^2 + \varepsilon}}
+$$
 
-## Generalization to unseen wireless conditions
+最終損失:
 
-<img src="imgs/Fig_generalization.png"  style="width: 88%;" />
+$$
+\mathcal{L}_{\mathrm{total}} = \mathcal{L}_{\mathrm{recon}} + \lambda_{\mathrm{corr}}\,\mathrm{corr}(I, E)
+$$
 
-## Blind-DiffCom Achieves Pilot-Free Transmission
+ここで $\lambda_{\mathrm{corr}}$ は `--lambda-corr` で指定します。
 
-<img src="imgs/Fig_ce_free.png"  style="width: 88%;" />
+## 2. データ構成
 
-## Requirements
+`train_djscc.py` / `test_djscc.py` は、次の構成を想定しています。
 
-Clone the repo and create a conda environment (we use PyTorch 1.9, CUDA 11.1).
+```text
+<split_dir>/
+  images/
+    xxx.png
+    yyy.jpg
+  importance/
+    xxx.png
+    yyy.png
+```
 
-TODO: check the dependencies
+- `importance/` がない、または対応ファイルが見つからない場合は all-ones マップにフォールバックします。
+- `--train-images-dir` / `--train-importance-dir` のような override 引数も利用できます。
 
-## Model Download
+## 3. 環境構築（例）
 
-We provide 3 pre-trained ADJSCC models in [this link](https://drive.google.com/drive/folders/1N0EzzxCv1wh6JeFr0g8vkmB0Qj23ozZJ?usp=sharing), please download them and put them in the `_djscc/ckpt` folder.
-
-The pre-trained Diffusion models are available at the following links, please download them and put them in the `model_zoo` folder.
-
-| Model                                                       |                                               Download link                                                |
-|-------------------------------------------------------------|:----------------------------------------------------------------------------------------------------------:|
-| 256x256_diffusion_uncond.pt(ILSVRC 2012 subset of ImageNet) | [download link](https://openaipublic.blob.core.windows.net/diffusion/jul-2021/256x256_diffusion_uncond.pt) |
-| ffhq_10m.pt                                                 |   [download link](https://drive.google.com/drive/folders/1jElnRoFv7b31fG0v6pTSQkelbSX3xGZh?usp=sharing)    |
-
-TODO: provide implementations of DiffCom based on \`SwinJSCC\` and \`NTSCC+\`.
-
-## Inference Code
+依存関係は固定の `requirements.txt` がないため、最低限として以下を推奨します。
 
 ```bash
-python main_diffcom.py --opt ./configs/diffcom.yaml
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install torch torchvision tqdm pillow opencv-python pyyaml lpips
 ```
 
-Please check the `diffcom.yaml` file for more details. 
-The codebase now supports `diffcom`, `hifi_diffcom`, and `blind_diffcom`.
+- `lpips` は評価時の LPIPS 計算で使います。未導入でも `test_djscc.py` は継続可能です。
 
-You can change the hyperparameters in the YAML file to run the corresponding method.
+## 4. 重みファイル
 
-## Acknowledgement
+### ADJSCC 事前学習重み
 
-The implementation is based on [DPS](https://github.com/DPS2022/diffusion-posterior-sampling), [PSLD](https://github.com/LituRout/PSLD).  
-We thank the authors for sharing their code.
+- `configs/diffcom.yaml` のデフォルトは `_djscc/ckpt/ADJSCC_C=2.pth.tar` を参照します。
+- 必要に応じて重みを `_djscc/ckpt/` に配置してください。
+- 公開済み ADJSCC 重み: https://drive.google.com/drive/folders/1N0EzzxCv1wh6JeFr0g8vkmB0Qj23ozZJ?usp=sharing
 
-## Citation
+### 拡散モデル重み（DiffCom 用）
 
-If you find this code useful for your research, please cite our paper
+- `ffhq_10m.pt` などを `model_zoo/` に配置してください。
+- 256x256_diffusion_uncond.pt: https://openaipublic.blob.core.windows.net/diffusion/jul-2021/256x256_diffusion_uncond.pt
+- ffhq_10m.pt: https://drive.google.com/drive/folders/1jElnRoFv7b31fG0v6pTSQkelbSX3xGZh?usp=sharing
 
+## 5. 実行コマンド
+
+### 5.1 重要度マップ生成（合成ランダム構造）
+
+```bash
+python3 generate_ffhq_importance_maps.py \
+  --input-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k \
+  --output-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k_importance \
+  --seed 42 \
+  --min-blobs 3 \
+  --max-blobs 8 \
+  --min-blob-radius-frac 0.04 \
+  --max-blob-radius-frac 0.22 \
+  --center-prob 0.65 \
+  --patch-prob 0.50 \
+  --stripe-prob 0.35 \
+  --blur-kernel 31
 ```
+
+### 5.2 ADJSCC 学習（通常実行）
+
+```bash
+python3 train_djscc.py \
+  --train-images-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k \
+  --train-importance-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k_importance \
+  --val-images-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k \
+  --val-importance-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k_importance \
+  --save-dir results/djscc_train_random_imp \
+  --channel-num 2 \
+  --image-size 256 \
+  --batch-size 8 \
+  --epochs 50 \
+  --lr 1e-4 \
+  --snr-range -10 10 \
+  --lambda-corr 0.1 \
+  --loss-type l1 \
+  --device cuda
+```
+
+### 5.3 ADJSCC 学習（`nohup` 実行）
+
+```bash
+mkdir -p results/djscc_train_random_imp
+
+nohup python3 train_djscc.py \
+  --train-images-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k \
+  --train-importance-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k_importance \
+  --save-dir results/djscc_train_random_imp \
+  --channel-num 2 \
+  --image-size 256 \
+  --batch-size 8 \
+  --epochs 50 \
+  --lr 1e-4 \
+  --snr-range -10 10 \
+  --lambda-corr 0.1 \
+  --device cuda \
+  > results/djscc_train_random_imp/train.log 2>&1 &
+
+# ログ確認
+tail -f results/djscc_train_random_imp/train.log
+```
+
+### 5.4 ADJSCC 学習再開（`nohup`）
+
+```bash
+nohup python3 train_djscc.py \
+  --resume results/djscc_train_random_imp/best.pth \
+  --epochs 100 \
+  --train-images-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k \
+  --train-importance-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k_importance \
+  --save-dir results/djscc_train_random_imp \
+  --channel-num 2 \
+  --image-size 256 \
+  --batch-size 8 \
+  --lr 1e-4 \
+  --snr-range -10 10 \
+  --lambda-corr 0.1 \
+  --device cuda \
+  > results/djscc_train_random_imp/resume.log 2>&1 &
+```
+
+### 5.5 ADJSCC 評価（平均値出力）
+
+```bash
+python3 test_djscc.py \
+  --checkpoint results/djscc_train_random_imp/best.pth \
+  --images-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k \
+  --importance-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k_importance \
+  --output-dir results/djscc_test_best \
+  --channel-num 2 \
+  --snr 0 \
+  --loss-type l1 \
+  --report-correlation \
+  --device cuda
+```
+
+### 5.6 ADJSCC 評価（画像ごとの指標も表示）
+
+```bash
+python3 test_djscc.py \
+  --checkpoint results/djscc_train_random_imp/best.pth \
+  --images-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k \
+  --importance-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k_importance \
+  --output-dir results/djscc_test_best \
+  --channel-num 2 \
+  --snr 5 \
+  --print-per-image-psnr \
+  --print-per-image-lpips \
+  --report-correlation \
+  --print-per-image-correlation \
+  --device cuda
+```
+
+### 5.7 DiffCom 推論（`configs/diffcom.yaml` 使用）
+
+```bash
+python3 main_diffcom.py --opt ./configs/diffcom.yaml
+```
+
+`nohup` で実行する場合:
+
+```bash
+mkdir -p results/diffcom_run
+nohup python3 main_diffcom.py --opt ./configs/diffcom.yaml \
+  > results/diffcom_run/infer.log 2>&1 &
+
+tail -f results/diffcom_run/infer.log
+```
+
+## 6. 主な出力
+
+- ADJSCC 学習: `--save-dir` 配下に `latest.pth`, `best.pth`, `final.pth`
+- ADJSCC 評価: `--output-dir` 配下に再構成画像を保存
+- DiffCom 推論: `configs/diffcom.yaml` の設定に従ってログと画像を出力
+
+## 7. 参考
+
+- 論文: [DiffCom: Channel Received Signal is a Natural Condition to Guide Diffusion Posterior Sampling](https://arxiv.org/abs/2406.07390)
+- プロジェクトページ: [https://semcomm.github.io/DiffCom/](https://semcomm.github.io/DiffCom/)
+
+## 8. Citation
+
+```bibtex
 @article{wang2024diffcom,
   title={DiffCom: Channel Received Signal is a Natural Condition to Guide Diffusion Posterior Sampling},
   author={Wang, Sixian and Dai, Jincheng and Tan, Kailin and Qin, Xiaoqi and Niu, Kai and Zhang, Ping},

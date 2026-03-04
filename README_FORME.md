@@ -34,8 +34,7 @@ nohup python3 /mnt/d/WSL_Work/diffcom_roi/diffcom/train_djscc.py \
   --epochs 50 \
   --lr 1e-4 \
   --snr-range -10 10 \
-  --alpha 4.0 \
-  --beta 0.5 \
+  --lambda-corr 0.1 \
   --device cuda \
   > /mnt/d/WSL_Work/diffcom_roi/diffcom/results/djscc_train_random_imp/train.log 2>&1 &
 ```
@@ -55,13 +54,12 @@ nohup python3 /mnt/d/WSL_Work/diffcom_roi/diffcom/train_djscc.py \
   --epochs 50 \
   --train-images-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k \
   --train-importance-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k_importance \
-  --alpha 4.0 \
   --channel-num 2 \
   --image-size 256 \
   --batch-size 8 \
   --lr 1e-4 \
   --snr-range -10 10 \
-  --beta 0.5 \
+  --lambda-corr 0.1 \
   --device cuda \
   > /mnt/d/WSL_Work/diffcom_roi/diffcom/results/djscc_train_random_imp/resume.log 2>&1 &
 ```
@@ -101,3 +99,24 @@ python3 /mnt/d/WSL_Work/diffcom_roi/diffcom/test_djscc.py \
 ## 5. 補足
 - LPIPS には `lpips` パッケージが必要です。未導入時は自動で LPIPS 計算を無効化して継続します。
 - 重要度マップが見つからない画像は、学習・テスト側で all-ones マップにフォールバックします。
+
+
+```
+python train_djscc.py \
+  --loss-type mse \
+  --lambda-corr 0.0 \
+  --disable-importance-gating
+```
+  python3 /mnt/d/WSL_Work/diffcom_roi/diffcom/train_djscc.py \
+    --train-images-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k \
+    --train-importance-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k_importance \
+    --save-dir /mnt/d/WSL_Work/diffcom_roi/diffcom/results/djscc_train_random_imp \
+    --channel-num 2 \
+    --image-size 256 \
+    --batch-size 8 \
+    --epochs 50 \
+    --lr 1e-4 \
+    --disable-importance-gating \
+    --snr-range -10 10 \
+    --lambda-corr 0.1 \
+    --device cuda

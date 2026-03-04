@@ -12,10 +12,9 @@ from _djscc.standalone_utils import (
     ImportanceImageDataset,
     RunningAverages,
     batch_psnr,
-    effective_alpha,
+    reconstruction_loss,
     resolve_split_dirs,
     sample_snr_db,
-    weighted_recon_loss,
 )
 from channel.channel import Channel
 
@@ -34,10 +33,6 @@ def parse_args():
     parser.add_argument("--channel-type", type=str, default="awgn", choices=["awgn", "rayleigh"])
     parser.add_argument("--snr", type=float, default=10.0, help="Fixed SNR in dB.")
     parser.add_argument("--snr-range", type=float, nargs=2, default=None, metavar=("LOW", "HIGH"))
-    parser.add_argument("--alpha", type=float, default=2.0, help="Importance-region loss weight for reporting.")
-    parser.add_argument("--beta", type=float, default=1.0, help="Background-region loss weight for reporting.")
-    parser.add_argument("--alpha-low-snr-threshold", type=float, default=None)
-    parser.add_argument("--alpha-low-snr-gain", type=float, default=0.0)
     parser.add_argument("--loss-type", type=str, default="l1", choices=["l1", "mse"])
     parser.add_argument("--disable-importance-gating", action="store_true")
     parser.add_argument(
@@ -220,12 +215,6 @@ def main():
             images = images.to(device, non_blocking=True)
             importance = importance.to(device, non_blocking=True)
             snr_db = choose_snr(args, rng)
-            alpha_eff = effective_alpha(
-                args.alpha,
-                snr_db,
-                low_snr_threshold=args.alpha_low_snr_threshold,
-                low_snr_gain=args.alpha_low_snr_gain,
-            )
 
             # Importance maps are used only by the encoder. Decoder does not consume them explicitly.
             recon = model(
@@ -233,15 +222,12 @@ def main():
                 given_SNR=snr_db,
                 importance_map=None if args.disable_importance_gating else importance,
             )
-            loss, l_roi, l_bg = weighted_recon_loss(
-                images, recon, importance, alpha=alpha_eff, beta=args.beta, use_mse=use_mse
-            )
+            loss = reconstruction_loss(images, recon, use_mse=use_mse)
             psnr_vec = batch_psnr(images, recon)
             psnr = psnr_vec.mean().item()
             averages.update(
                 loss=float(loss.item()),
-                l_roi=float(l_roi.item()),
-                l_bg=float(l_bg.item()),
+                recon_loss=float(loss.item()),
                 psnr=psnr,
                 n=images.size(0),
             )
@@ -281,8 +267,7 @@ def main():
     stats = averages.compute()
     print_section("Final Summary")
     print(f"avg_loss        : {stats['loss']:.6f}")
-    print(f"avg_l_roi       : {stats['l_roi']:.6f}")
-    print(f"avg_l_bg        : {stats['l_bg']:.6f}")
+    print(f"avg_recon_loss  : {stats['recon_loss']:.6f}")
     print(f"avg_psnr        : {stats['psnr']:.4f} dB")
     if lpips_metric is not None:
         avg_lpips = lpips_sum / max(lpips_count, 1)
