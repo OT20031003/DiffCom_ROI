@@ -68,6 +68,7 @@ def parse_args():
     )
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--num-test-images", type=int, default=None, help="Number of images to test.")
     return parser.parse_args()
 
 
@@ -212,6 +213,15 @@ def main():
     model.eval()
     with torch.no_grad():
         for images, importance, names in loader:
+            if args.num_test_images is not None and image_counter >= args.num_test_images:
+                break
+                
+            remaining = args.num_test_images - image_counter if args.num_test_images is not None else len(names)
+            if remaining < len(names):
+                images = images[:remaining]
+                importance = importance[:remaining]
+                names = names[:remaining]
+
             images = images.to(device, non_blocking=True)
             importance = importance.to(device, non_blocking=True)
             snr_db = choose_snr(args, rng)
@@ -249,10 +259,24 @@ def main():
                 lpips_count += int(lpips_vals.numel())
 
             recon = recon.clamp(0.0, 1.0)
+            images_clamped = images.clamp(0.0, 1.0)
+            importance_clamped = importance.clamp(0.0, 1.0)
+            
             for i, name in enumerate(names):
                 image_counter += 1
-                save_path = os.path.join(args.output_dir, name)
-                save_image(recon[i], save_path)
+                
+                # 確実にPNG形式で保存するため拡張子を書き換える
+                name_png = os.path.splitext(name)[0] + ".png"
+                save_path = os.path.join(args.output_dir, name_png)
+                
+                imp_i = importance_clamped[i]
+                if imp_i.size(0) == 1 and recon.size(1) == 3:
+                    # Importance Mapが1チャンネルの場合、結合のために3チャンネルに拡張
+                    imp_i = imp_i.repeat(3, 1, 1)
+                    
+                # [復元画像, Importance Map, Ground Truth] の順番に横方向(dim=2)で結合
+                combined = torch.cat([recon[i], imp_i, images_clamped[i]], dim=2)
+                save_image(combined, save_path)
 
                 if args.print_per_image_psnr or args.print_per_image_lpips or args.print_per_image_correlation:
                     parts = [f"[{image_counter}/{len(dataset)}] {name}"]

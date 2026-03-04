@@ -195,7 +195,8 @@ python3 test_djscc.py \
   --print-per-image-lpips \
   --report-correlation \
   --print-per-image-correlation \
-  --device cuda
+  --device cuda \
+  --num-test-images 10
 ```
 
 ### 5.7 DiffCom 推論（`configs/diffcom.yaml` 使用）
