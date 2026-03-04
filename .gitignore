@@ -5,3 +5,6 @@ testsets
 _djscc/ckpt/*.tar
 *.pt
 __pyc*
+website
+configs
+*.pdf

@@ -57,18 +57,14 @@ class NonlinearOperator(ABC):
 def shuffle(x, shuffled_indices=None):
     B, N_s = x.shape
     if shuffled_indices is None:
-        shuffled_indices = torch.randperm(N_s)
-    x = x.reshape(B, -1)[..., shuffled_indices].reshape(B, N_s)
+        # Shuffle disabled: keep an identity index for API compatibility.
+        shuffled_indices = torch.arange(N_s, device=x.device)
     return x, shuffled_indices
 
 
 def de_shuffle(x, shuffled_indices):
-    B, N_s = x.shape
-    x = x.reshape(B, -1)
-    x_rx = torch.zeros_like(x)
-    x_rx[..., shuffled_indices] = x
-    x_rx = x_rx.reshape(B, N_s)
-    return x_rx
+    # Shuffle disabled: symbols are already in original order.
+    return x
 
 
 class ChannelWrapper(nn.Module):

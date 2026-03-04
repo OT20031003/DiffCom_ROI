@@ -59,7 +59,7 @@ diffcom_series:
   diffcom:
     lr_schedule: constant
     learning_rate: 1.0
-    zeta: 0.6
+    zeta: 0.1
     gamma: 0.0
 
   hifi_diffcom:

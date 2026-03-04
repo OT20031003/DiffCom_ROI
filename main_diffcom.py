@@ -262,9 +262,9 @@ def p_sample_loop(config, noise_schedule, unet, diffusion, operator, cond_method
             # calculate metrics
             metrics = metric_wrapper((x_0_hat / 2 + 0.5).detach(), input_image)
 
-            if i > 100 and metrics['psnr'] < 6:
-                print('Failed to converge, Please check the reverse diffusion process.')
-                break
+            # if i > 100 and metrics['psnr'] < 6:
+            #     print('Failed to converge, Please check the reverse diffusion process.')
+            #     break
 
             message = {'t_step': seq[i],
                        'H_dist': 0.0,
