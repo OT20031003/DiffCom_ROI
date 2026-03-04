@@ -119,10 +119,23 @@ def load_model_weights(model: nn.Module, ckpt_path: str, device: torch.device, s
     return ckpt_obj, load_result
 
 
+def pearson_corr(a: torch.Tensor, b: torch.Tensor, eps: float = 1e-8) -> float:
+    a = a.reshape(-1).float()
+    b = b.reshape(-1).float()
+    a = a - a.mean()
+    b = b - b.mean()
+    denom = torch.sqrt(torch.sum(a * a) * torch.sum(b * b)) + eps
+    if denom.item() <= eps:
+        return 0.0
+    return float((torch.sum(a * b) / denom).item())
+
+
 def run_epoch(model, loader, optimizer, device, args, rng, train: bool, epoch: int):
     model.train(mode=train)
     averages = RunningAverages()
     use_mse = args.loss_type == "mse"
+    corr_sum = 0.0
+    corr_count = 0
     mode_name = "train" if train else "val"
     pbar = tqdm(
         loader,
@@ -159,6 +172,17 @@ def run_epoch(model, loader, optimizer, device, args, rng, train: bool, epoch: i
                 loss.backward()
                 optimizer.step()
 
+        err_map = torch.mean(torch.abs(images - recon), dim=1, keepdim=True)
+        batch_corr_sum = 0.0
+        batch_corr_count = 0
+        with torch.no_grad():
+            for i in range(images.size(0)):
+                corr_value = pearson_corr(importance[i], err_map[i])
+                corr_sum += corr_value
+                corr_count += 1
+                batch_corr_sum += corr_value
+                batch_corr_count += 1
+
         psnr_value = batch_psnr(images, recon).mean().item()
         batch_size = images.size(0)
         averages.update(
@@ -169,16 +193,18 @@ def run_epoch(model, loader, optimizer, device, args, rng, train: bool, epoch: i
             n=batch_size,
         )
 
-        if step % max(1, args.log_interval) == 0 or step == len(loader):
-            current = averages.compute()
-            pbar.set_postfix(
-                loss=f"{current['loss']:.4f}",
-                psnr=f"{current['psnr']:.2f}",
-                snr=f"{snr_db:.2f}dB",
-                alpha=f"{alpha_eff:.2f}",
-            )
+        current = averages.compute()
+        pbar.set_postfix(
+            loss=f"{current['loss']:.4f}",
+            psnr=f"{current['psnr']:.2f}",
+            corr=f"{(corr_sum / max(corr_count, 1)):.4f}",
+            corr_step=f"{(batch_corr_sum / max(batch_corr_count, 1)):.4f}",
+            snr=f"{snr_db:.2f}dB",
+        )
 
-    return averages.compute()
+    result = averages.compute()
+    result["corr"] = corr_sum / max(corr_count, 1)
+    return result
 
 
 def main():
@@ -259,7 +285,8 @@ def main():
         train_stats = run_epoch(model, train_loader, optimizer, device, args, rng, train=True, epoch=epoch)
         print(
             f"[epoch {epoch}] train loss={train_stats['loss']:.6f} "
-            f"l_roi={train_stats['l_roi']:.6f} l_bg={train_stats['l_bg']:.6f} psnr={train_stats['psnr']:.2f}"
+            f"l_roi={train_stats['l_roi']:.6f} l_bg={train_stats['l_bg']:.6f} "
+            f"psnr={train_stats['psnr']:.2f} corr={train_stats['corr']:.4f}"
         )
 
         val_stats = None
@@ -268,7 +295,8 @@ def main():
                 val_stats = run_epoch(model, val_loader, optimizer, device, args, rng, train=False, epoch=epoch)
             print(
                 f"[epoch {epoch}] val   loss={val_stats['loss']:.6f} "
-                f"l_roi={val_stats['l_roi']:.6f} l_bg={val_stats['l_bg']:.6f} psnr={val_stats['psnr']:.2f}"
+                f"l_roi={val_stats['l_roi']:.6f} l_bg={val_stats['l_bg']:.6f} "
+                f"psnr={val_stats['psnr']:.2f} corr={val_stats['corr']:.4f}"
             )
 
         save_payload = {
