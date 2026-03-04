@@ -40,6 +40,22 @@ def parse_args():
     parser.add_argument("--alpha-low-snr-gain", type=float, default=0.0)
     parser.add_argument("--loss-type", type=str, default="l1", choices=["l1", "mse"])
     parser.add_argument("--disable-importance-gating", action="store_true")
+    parser.add_argument(
+        "--report-correlation",
+        action="store_true",
+        help="Report Pearson correlation between importance map and reconstruction error map.",
+    )
+    parser.add_argument(
+        "--print-per-image-correlation",
+        action="store_true",
+        help="Print per-image correlation values.",
+    )
+    parser.add_argument(
+        "--correlation-eps",
+        type=float,
+        default=1e-8,
+        help="Numerical epsilon for Pearson correlation denominator.",
+    )
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
@@ -92,6 +108,17 @@ def choose_snr(args, rng: random.Random) -> float:
     return sample_snr_db(args.snr, snr_range, rng)
 
 
+def pearson_corr(a: torch.Tensor, b: torch.Tensor, eps: float = 1e-8) -> float:
+    a = a.reshape(-1).float()
+    b = b.reshape(-1).float()
+    a = a - a.mean()
+    b = b - b.mean()
+    denom = torch.sqrt(torch.sum(a * a) * torch.sum(b * b)) + eps
+    if denom.item() <= eps:
+        return 0.0
+    return float((torch.sum(a * b) / denom).item())
+
+
 def main():
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
@@ -129,6 +156,8 @@ def main():
 
     use_mse = args.loss_type == "mse"
     averages = RunningAverages()
+    corr_sum = 0.0
+    corr_count = 0
     model.eval()
     with torch.no_grad():
         for images, importance, names in loader:
@@ -160,6 +189,15 @@ def main():
                 n=images.size(0),
             )
 
+            if args.report_correlation:
+                err_map = torch.mean(torch.abs(images - recon), dim=1, keepdim=True)
+                for i, name in enumerate(names):
+                    corr = pearson_corr(importance[i], err_map[i], eps=args.correlation_eps)
+                    corr_sum += corr
+                    corr_count += 1
+                    if args.print_per_image_correlation:
+                        print(f"[corr] {name}: {corr:.6f}")
+
             recon = recon.clamp(0.0, 1.0)
             for i, name in enumerate(names):
                 save_path = os.path.join(args.output_dir, name)
@@ -170,6 +208,9 @@ def main():
         f"Test complete | avg_loss={stats['loss']:.6f} "
         f"avg_l_roi={stats['l_roi']:.6f} avg_l_bg={stats['l_bg']:.6f} avg_psnr={stats['psnr']:.2f}"
     )
+    if args.report_correlation:
+        avg_corr = corr_sum / max(corr_count, 1)
+        print(f"Pearson correlation (importance vs error map): avg={avg_corr:.6f}, samples={corr_count}")
     print(f"Saved reconstructions to: {args.output_dir}")
 
 

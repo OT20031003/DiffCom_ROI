@@ -6,6 +6,7 @@ from typing import Optional, Tuple
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 
 from _djscc.network import ADJSCC
 from _djscc.standalone_utils import (
@@ -118,12 +119,20 @@ def load_model_weights(model: nn.Module, ckpt_path: str, device: torch.device, s
     return ckpt_obj, load_result
 
 
-def run_epoch(model, loader, optimizer, device, args, rng, train: bool):
+def run_epoch(model, loader, optimizer, device, args, rng, train: bool, epoch: int):
     model.train(mode=train)
     averages = RunningAverages()
     use_mse = args.loss_type == "mse"
+    mode_name = "train" if train else "val"
+    pbar = tqdm(
+        loader,
+        total=len(loader),
+        desc=f"{mode_name} epoch {epoch}/{args.epochs}",
+        dynamic_ncols=True,
+        leave=False,
+    )
 
-    for step, (images, importance, _names) in enumerate(loader, start=1):
+    for step, (images, importance, _names) in enumerate(pbar, start=1):
         images = images.to(device, non_blocking=True)
         importance = importance.to(device, non_blocking=True)
 
@@ -160,11 +169,13 @@ def run_epoch(model, loader, optimizer, device, args, rng, train: bool):
             n=batch_size,
         )
 
-        if train and step % args.log_interval == 0:
+        if step % max(1, args.log_interval) == 0 or step == len(loader):
             current = averages.compute()
-            print(
-                f"[train] step={step}/{len(loader)} snr={snr_db:.2f}dB "
-                f"alpha_eff={alpha_eff:.4f} loss={current['loss']:.6f} psnr={current['psnr']:.2f}"
+            pbar.set_postfix(
+                loss=f"{current['loss']:.4f}",
+                psnr=f"{current['psnr']:.2f}",
+                snr=f"{snr_db:.2f}dB",
+                alpha=f"{alpha_eff:.2f}",
             )
 
     return averages.compute()
@@ -180,6 +191,8 @@ def main():
     train_images_dir, train_importance_dir = split_dirs(
         args.train_dir, args.train_images_dir, args.train_importance_dir
     )
+    # Importance maps are expected as pre-generated PNGs in the importance directory.
+    # In this workflow they can be synthetic random structured priors, not semantic masks.
     train_dataset = ImportanceImageDataset(
         images_dir=train_images_dir,
         importance_dir=train_importance_dir,
@@ -243,7 +256,7 @@ def main():
             best_val_loss = float(ckpt_obj["best_val_loss"])
 
     for epoch in range(start_epoch, args.epochs + 1):
-        train_stats = run_epoch(model, train_loader, optimizer, device, args, rng, train=True)
+        train_stats = run_epoch(model, train_loader, optimizer, device, args, rng, train=True, epoch=epoch)
         print(
             f"[epoch {epoch}] train loss={train_stats['loss']:.6f} "
             f"l_roi={train_stats['l_roi']:.6f} l_bg={train_stats['l_bg']:.6f} psnr={train_stats['psnr']:.2f}"
@@ -252,7 +265,7 @@ def main():
         val_stats = None
         if val_loader is not None:
             with torch.no_grad():
-                val_stats = run_epoch(model, val_loader, optimizer, device, args, rng, train=False)
+                val_stats = run_epoch(model, val_loader, optimizer, device, args, rng, train=False, epoch=epoch)
             print(
                 f"[epoch {epoch}] val   loss={val_stats['loss']:.6f} "
                 f"l_roi={val_stats['l_roi']:.6f} l_bg={val_stats['l_bg']:.6f} psnr={val_stats['psnr']:.2f}"

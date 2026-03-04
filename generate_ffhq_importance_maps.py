@@ -1,69 +1,34 @@
 #!/usr/bin/env python3
 """
-Generate soft grayscale importance maps for FFHQ-style face images.
+Generate synthetic random structured importance-map PNGs.
 
-Detection priority:
-1) MediaPipe Face Mesh (if installed)
-2) dlib 68-point landmarks (if installed and predictor path is provided)
-3) OpenCV Haar face detector
-4) Center-face prior fallback (always available)
-
-Output: one grayscale PNG per input image. Brighter means more important.
+This script intentionally does NOT use facial landmark/segmentation/recognition models.
+Maps are random spatial priors (blobs, soft patches, stripes, optional center bias).
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import List
 
-try:
-    import numpy as np  # type: ignore
-except Exception:
-    np = None
-
-try:
-    import cv2  # type: ignore
-except Exception:
-    cv2 = None
+import cv2
+import numpy as np
 
 
 SUPPORTED_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 
 
-# MediaPipe Face Mesh landmark groups (indices).
-MP_LEFT_EYE = [33, 133, 160, 159, 158, 157, 173, 144, 145, 153, 154, 155]
-MP_RIGHT_EYE = [362, 263, 387, 386, 385, 384, 398, 373, 374, 380, 381, 382]
-MP_LEFT_BROW = [70, 63, 105, 66, 107, 55, 65, 52, 53, 46]
-MP_RIGHT_BROW = [336, 296, 334, 293, 300, 285, 295, 282, 283, 276]
-MP_NOSE = [168, 197, 195, 5, 4, 1, 2, 98, 327]
-MP_MOUTH = [
-    61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 308, 324, 318, 402, 317,
-    14, 87, 178, 88, 95, 185, 40, 39, 37, 0, 267, 269, 270, 409, 415, 310, 311, 312,
-    13, 82, 81, 42, 183, 78
-]
-MP_FACE_OVAL = [
-    10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378,
-    400, 377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54,
-    103, 67, 109
-]
-
-
 @dataclass
 class Stats:
-    total: int = 0
-    success: int = 0
-    fallback: int = 0
+    total_images: int = 0
+    generated: int = 0
     failed_to_read: int = 0
-    mediapipe_used: int = 0
-    dlib_used: int = 0
-    opencv_used: int = 0
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate FFHQ importance-map PNGs.")
+    parser = argparse.ArgumentParser(description="Generate random structured importance-map PNGs.")
     parser.add_argument(
         "--input-dir",
         type=str,
@@ -76,47 +41,36 @@ def parse_args() -> argparse.Namespace:
         default="/mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k_importance",
         help="Output directory for grayscale PNG maps.",
     )
-    parser.add_argument(
-        "--recursive",
-        action="store_true",
-        help="Recursively scan subdirectories. Default: non-recursive.",
-    )
+    parser.add_argument("--recursive", action="store_true", help="Recursively scan input directory.")
     parser.add_argument(
         "--image-size",
         type=int,
         default=0,
-        help="Optional resize to square size before processing (0 keeps original size).",
+        help="Optional square resize before map generation. 0 keeps original image size.",
     )
+    parser.add_argument("--background-weight", type=float, default=0.15, help="Base low importance in [0,1].")
+    parser.add_argument("--min-blobs", type=int, default=3, help="Minimum number of smooth random blobs.")
+    parser.add_argument("--max-blobs", type=int, default=8, help="Maximum number of smooth random blobs.")
     parser.add_argument(
-        "--blur-kernel",
-        type=int,
-        default=31,
-        help="Gaussian blur kernel for soft masks (odd integer).",
-    )
-    parser.add_argument(
-        "--background-weight",
+        "--min-blob-radius-frac",
         type=float,
-        default=0.15,
-        help="Base background importance in [0,1].",
+        default=0.04,
+        help="Minimum blob radius as fraction of min(H, W).",
     )
     parser.add_argument(
-        "--fallback-center-prior",
+        "--max-blob-radius-frac",
         type=float,
-        default=1.0,
-        help="Scale factor for center-prior fallback strength.",
+        default=0.22,
+        help="Maximum blob radius as fraction of min(H, W).",
     )
-    parser.add_argument(
-        "--dlib-shape-predictor",
-        type=str,
-        default="",
-        help="Path to dlib shape_predictor_68_face_landmarks.dat (optional).",
-    )
-    parser.add_argument(
-        "--progress-interval",
-        type=int,
-        default=200,
-        help="Print progress every N images.",
-    )
+    parser.add_argument("--center-prob", type=float, default=0.65, help="Probability of adding center-prior blob.")
+    parser.add_argument("--patch-prob", type=float, default=0.50, help="Probability of adding soft rectangle patches.")
+    parser.add_argument("--stripe-prob", type=float, default=0.35, help="Probability of adding soft stripe regions.")
+    parser.add_argument("--max-patches", type=int, default=2, help="Maximum number of patch regions.")
+    parser.add_argument("--max-stripes", type=int, default=2, help="Maximum number of stripe regions.")
+    parser.add_argument("--blur-kernel", type=int, default=31, help="Final Gaussian blur kernel (odd integer).")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
+    parser.add_argument("--progress-interval", type=int, default=200, help="Print progress every N images.")
     return parser.parse_args()
 
 
@@ -125,289 +79,130 @@ def ensure_odd(x: int, minimum: int = 3) -> int:
     return x if x % 2 == 1 else x + 1
 
 
-def gather_images(input_dir: str, recursive: bool) -> List[Path]:
-    root = Path(input_dir)
-    if not root.exists():
-        raise FileNotFoundError(f"Input directory does not exist: {input_dir}")
+def gather_images(input_dir: Path, recursive: bool) -> List[Path]:
     if recursive:
-        paths = [p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS]
+        paths = [p for p in input_dir.rglob("*") if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS]
     else:
-        paths = [p for p in root.glob("*") if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS]
+        paths = [p for p in input_dir.glob("*") if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS]
     return sorted(paths)
 
 
-class DetectorStack:
-    def __init__(self, dlib_shape_predictor: str = ""):
-        self.mp_face_mesh = None
-        self.dlib_detector = None
-        self.dlib_predictor = None
-        self.cv2_face_cascade = None
-
-        self._init_mediapipe()
-        self._init_dlib(dlib_shape_predictor)
-        self._init_opencv()
-
-    def _init_mediapipe(self) -> None:
-        try:
-            import mediapipe as mp  # type: ignore
-
-            self.mp_face_mesh = mp.solutions.face_mesh.FaceMesh(
-                static_image_mode=True,
-                max_num_faces=1,
-                refine_landmarks=True,
-                min_detection_confidence=0.5,
-            )
-        except Exception:
-            self.mp_face_mesh = None
-
-    def _init_dlib(self, predictor_path: str) -> None:
-        if not predictor_path:
-            return
-        if not os.path.isfile(predictor_path):
-            return
-        try:
-            import dlib  # type: ignore
-
-            self.dlib_detector = dlib.get_frontal_face_detector()
-            self.dlib_predictor = dlib.shape_predictor(predictor_path)
-        except Exception:
-            self.dlib_detector = None
-            self.dlib_predictor = None
-
-    def _init_opencv(self) -> None:
-        cascade_path = os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml")
-        if os.path.isfile(cascade_path):
-            cascade = cv2.CascadeClassifier(cascade_path)
-            if not cascade.empty():
-                self.cv2_face_cascade = cascade
-
-    def status(self) -> Dict[str, bool]:
-        return {
-            "mediapipe": self.mp_face_mesh is not None,
-            "dlib": self.dlib_detector is not None and self.dlib_predictor is not None,
-            "opencv": self.cv2_face_cascade is not None,
-        }
-
-    def close(self) -> None:
-        if self.mp_face_mesh is not None:
-            self.mp_face_mesh.close()
+def add_gaussian_blob(
+    canvas: np.ndarray,
+    rng: np.random.Generator,
+    cx: float,
+    cy: float,
+    rx: float,
+    ry: float,
+    weight: float,
+) -> None:
+    h, w = canvas.shape
+    yy, xx = np.mgrid[0:h, 0:w]
+    dist = ((xx - cx) ** 2) / (2.0 * rx * rx + 1e-6) + ((yy - cy) ** 2) / (2.0 * ry * ry + 1e-6)
+    blob = np.exp(-dist, dtype=np.float32)
+    canvas += weight * blob.astype(np.float32)
 
 
-class ImportanceMapBuilder:
-    def __init__(self, blur_kernel: int, background_weight: float, fallback_center_prior: float):
-        self.blur_kernel = ensure_odd(blur_kernel)
-        self.background_weight = float(np.clip(background_weight, 0.0, 1.0))
-        self.fallback_center_prior = max(float(fallback_center_prior), 0.0)
-
-        # Relative region weights.
-        self.w_eye = 0.85
-        self.w_brow = 0.60
-        self.w_nose = 0.60
-        self.w_mouth = 0.70
-        self.w_face = 0.45
-        self.w_hair = 0.35
-
-    def _add_soft_polygon(
-        self,
-        out: np.ndarray,
-        points: np.ndarray,
-        weight: float,
-        blur_scale: float = 1.0,
-    ) -> None:
-        if points.shape[0] < 3:
-            return
-        mask = np.zeros_like(out, dtype=np.float32)
-        hull = cv2.convexHull(points.astype(np.int32))
-        cv2.fillConvexPoly(mask, hull, 1.0)
-        k = ensure_odd(int(self.blur_kernel * blur_scale))
-        mask = cv2.GaussianBlur(mask, (k, k), 0)
-        if mask.max() > 1e-6:
-            mask /= mask.max()
-        out += weight * mask
-
-    def _add_soft_ellipse(
-        self,
-        out: np.ndarray,
-        center: Tuple[int, int],
-        axes: Tuple[int, int],
-        angle: float,
-        weight: float,
-        blur_scale: float = 1.0,
-    ) -> None:
-        mask = np.zeros_like(out, dtype=np.float32)
-        axes = (max(int(axes[0]), 1), max(int(axes[1]), 1))
-        cv2.ellipse(mask, center, axes, angle, 0, 360, 1.0, -1)
-        k = ensure_odd(int(self.blur_kernel * blur_scale))
-        mask = cv2.GaussianBlur(mask, (k, k), 0)
-        if mask.max() > 1e-6:
-            mask /= mask.max()
-        out += weight * mask
-
-    def _center_prior(self, h: int, w: int) -> np.ndarray:
-        out = np.full((h, w), self.background_weight, dtype=np.float32)
-        cx, cy = w // 2, int(h * 0.56)
-        self._add_soft_ellipse(
-            out, (cx, cy), (int(0.28 * w), int(0.36 * h)), 0, self.w_face * self.fallback_center_prior, blur_scale=1.2
-        )
-        self._add_soft_ellipse(
-            out, (cx, int(h * 0.30)), (int(0.32 * w), int(0.24 * h)), 0, self.w_hair * self.fallback_center_prior, blur_scale=1.3
-        )
-        self._add_soft_ellipse(
-            out, (int(w * 0.37), int(h * 0.50)), (int(0.07 * w), int(0.05 * h)), 0, self.w_eye * self.fallback_center_prior
-        )
-        self._add_soft_ellipse(
-            out, (int(w * 0.63), int(h * 0.50)), (int(0.07 * w), int(0.05 * h)), 0, self.w_eye * self.fallback_center_prior
-        )
-        self._add_soft_ellipse(
-            out, (cx, int(h * 0.58)), (int(0.06 * w), int(0.08 * h)), 0, self.w_nose * self.fallback_center_prior
-        )
-        self._add_soft_ellipse(
-            out, (cx, int(h * 0.68)), (int(0.12 * w), int(0.06 * h)), 0, self.w_mouth * self.fallback_center_prior
-        )
-        np.clip(out, 0.0, 1.0, out=out)
-        return out
-
-    def _build_from_rect(self, h: int, w: int, rect: Tuple[int, int, int, int]) -> np.ndarray:
-        out = np.full((h, w), self.background_weight, dtype=np.float32)
-        x, y, rw, rh = rect
-        cx, cy = int(x + rw * 0.5), int(y + rh * 0.58)
-
-        self._add_soft_ellipse(out, (cx, cy), (int(rw * 0.54), int(rh * 0.65)), 0, self.w_face, blur_scale=1.2)
-        self._add_soft_ellipse(out, (cx, int(y + rh * 0.18)), (int(rw * 0.70), int(rh * 0.42)), 0, self.w_hair, blur_scale=1.2)
-
-        self._add_soft_ellipse(out, (int(x + rw * 0.33), int(y + rh * 0.43)), (int(rw * 0.10), int(rh * 0.06)), 0, self.w_eye)
-        self._add_soft_ellipse(out, (int(x + rw * 0.67), int(y + rh * 0.43)), (int(rw * 0.10), int(rh * 0.06)), 0, self.w_eye)
-        self._add_soft_ellipse(out, (int(x + rw * 0.33), int(y + rh * 0.36)), (int(rw * 0.11), int(rh * 0.04)), 0, self.w_brow)
-        self._add_soft_ellipse(out, (int(x + rw * 0.67), int(y + rh * 0.36)), (int(rw * 0.11), int(rh * 0.04)), 0, self.w_brow)
-        self._add_soft_ellipse(out, (cx, int(y + rh * 0.56)), (int(rw * 0.08), int(rh * 0.11)), 0, self.w_nose)
-        self._add_soft_ellipse(out, (cx, int(y + rh * 0.72)), (int(rw * 0.16), int(rh * 0.07)), 0, self.w_mouth)
-
-        np.clip(out, 0.0, 1.0, out=out)
-        return out
-
-    @staticmethod
-    def _points_from_indices(points: np.ndarray, indices: Sequence[int]) -> np.ndarray:
-        valid = [idx for idx in indices if 0 <= idx < points.shape[0]]
-        if not valid:
-            return np.zeros((0, 2), dtype=np.int32)
-        return points[valid].astype(np.int32)
-
-    def _build_from_mediapipe(self, h: int, w: int, points: np.ndarray) -> np.ndarray:
-        out = np.full((h, w), self.background_weight, dtype=np.float32)
-
-        left_eye = self._points_from_indices(points, MP_LEFT_EYE)
-        right_eye = self._points_from_indices(points, MP_RIGHT_EYE)
-        left_brow = self._points_from_indices(points, MP_LEFT_BROW)
-        right_brow = self._points_from_indices(points, MP_RIGHT_BROW)
-        nose = self._points_from_indices(points, MP_NOSE)
-        mouth = self._points_from_indices(points, MP_MOUTH)
-        face_oval = self._points_from_indices(points, MP_FACE_OVAL)
-
-        self._add_soft_polygon(out, left_eye, self.w_eye)
-        self._add_soft_polygon(out, right_eye, self.w_eye)
-        self._add_soft_polygon(out, left_brow, self.w_brow)
-        self._add_soft_polygon(out, right_brow, self.w_brow)
-        self._add_soft_polygon(out, nose, self.w_nose)
-        self._add_soft_polygon(out, mouth, self.w_mouth)
-
-        if face_oval.shape[0] >= 3:
-            x, y, rw, rh = cv2.boundingRect(face_oval)
-            cx, cy = int(x + rw * 0.5), int(y + rh * 0.56)
-            self._add_soft_ellipse(out, (cx, cy), (int(rw * 0.50), int(rh * 0.62)), 0, self.w_face, blur_scale=1.25)
-            self._add_soft_ellipse(out, (cx, int(y + rh * 0.18)), (int(rw * 0.70), int(rh * 0.38)), 0, self.w_hair, blur_scale=1.3)
-        else:
-            out += self._center_prior(h, w) * 0.4
-
-        np.clip(out, 0.0, 1.0, out=out)
-        return out
-
-    def _build_from_dlib(self, h: int, w: int, points68: np.ndarray) -> np.ndarray:
-        out = np.full((h, w), self.background_weight, dtype=np.float32)
-        jaw = points68[0:17]
-        left_brow = points68[17:22]
-        right_brow = points68[22:27]
-        nose = points68[27:36]
-        left_eye = points68[36:42]
-        right_eye = points68[42:48]
-        mouth = points68[48:68]
-
-        self._add_soft_polygon(out, left_eye, self.w_eye)
-        self._add_soft_polygon(out, right_eye, self.w_eye)
-        self._add_soft_polygon(out, left_brow, self.w_brow)
-        self._add_soft_polygon(out, right_brow, self.w_brow)
-        self._add_soft_polygon(out, nose, self.w_nose)
-        self._add_soft_polygon(out, mouth, self.w_mouth)
-
-        x, y, rw, rh = cv2.boundingRect(jaw.astype(np.int32))
-        cx, cy = int(x + rw * 0.5), int(y + rh * 0.56)
-        self._add_soft_ellipse(out, (cx, cy), (int(rw * 0.52), int(rh * 0.66)), 0, self.w_face, blur_scale=1.2)
-        self._add_soft_ellipse(out, (cx, int(y + rh * 0.08)), (int(rw * 0.70), int(rh * 0.45)), 0, self.w_hair, blur_scale=1.25)
-
-        np.clip(out, 0.0, 1.0, out=out)
-        return out
-
-    def build(
-        self,
-        image_bgr: np.ndarray,
-        detectors: DetectorStack,
-    ) -> Tuple[np.ndarray, str]:
-        h, w = image_bgr.shape[:2]
-        rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-        gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-
-        # 1) MediaPipe Face Mesh
-        if detectors.mp_face_mesh is not None:
-            try:
-                result = detectors.mp_face_mesh.process(rgb)
-                if result.multi_face_landmarks:
-                    lm = result.multi_face_landmarks[0].landmark
-                    points = np.array(
-                        [[int(np.clip(p.x * w, 0, w - 1)), int(np.clip(p.y * h, 0, h - 1))] for p in lm],
-                        dtype=np.int32,
-                    )
-                    return self._build_from_mediapipe(h, w, points), "mediapipe"
-            except Exception:
-                pass
-
-        # 2) dlib 68 landmarks
-        if detectors.dlib_detector is not None and detectors.dlib_predictor is not None:
-            try:
-                rects = detectors.dlib_detector(gray, 1)
-                if len(rects) > 0:
-                    rect = max(rects, key=lambda r: (r.right() - r.left()) * (r.bottom() - r.top()))
-                    shape = detectors.dlib_predictor(gray, rect)
-                    points = np.array([[shape.part(i).x, shape.part(i).y] for i in range(68)], dtype=np.int32)
-                    return self._build_from_dlib(h, w, points), "dlib"
-            except Exception:
-                pass
-
-        # 3) OpenCV Haar detector
-        if detectors.cv2_face_cascade is not None:
-            faces = detectors.cv2_face_cascade.detectMultiScale(
-                gray,
-                scaleFactor=1.1,
-                minNeighbors=5,
-                minSize=(40, 40),
-            )
-            if len(faces) > 0:
-                x, y, rw, rh = max(faces, key=lambda b: b[2] * b[3])
-                return self._build_from_rect(h, w, (int(x), int(y), int(rw), int(rh))), "opencv"
-
-        # 4) Generic center prior fallback
-        return self._center_prior(h, w), "fallback"
+def add_soft_patch(canvas: np.ndarray, rng: np.random.Generator, blur_kernel: int) -> None:
+    h, w = canvas.shape
+    patch_mask = np.zeros_like(canvas, dtype=np.float32)
+    pw = int(rng.uniform(0.12, 0.45) * w)
+    ph = int(rng.uniform(0.10, 0.38) * h)
+    x0 = int(rng.integers(0, max(1, w - pw)))
+    y0 = int(rng.integers(0, max(1, h - ph)))
+    patch_mask[y0 : y0 + ph, x0 : x0 + pw] = 1.0
+    patch_mask = cv2.GaussianBlur(patch_mask, (blur_kernel, blur_kernel), 0)
+    if patch_mask.max() > 1e-6:
+        patch_mask /= patch_mask.max()
+    canvas += float(rng.uniform(0.15, 0.55)) * patch_mask
 
 
-def map_to_uint8(importance: np.ndarray) -> np.ndarray:
-    importance = np.clip(importance, 0.0, 1.0)
-    return (importance * 255.0 + 0.5).astype(np.uint8)
+def add_soft_stripe(canvas: np.ndarray, rng: np.random.Generator, blur_kernel: int) -> None:
+    h, w = canvas.shape
+    stripe_mask = np.zeros_like(canvas, dtype=np.float32)
+    orientation = int(rng.integers(0, 3))  # 0: horizontal, 1: vertical, 2: diagonal
+
+    if orientation == 0:
+        y = int(rng.integers(0, h))
+        thickness = int(max(2, rng.uniform(0.03, 0.10) * h))
+        cv2.line(stripe_mask, (0, y), (w - 1, y), 1.0, thickness)
+    elif orientation == 1:
+        x = int(rng.integers(0, w))
+        thickness = int(max(2, rng.uniform(0.03, 0.10) * w))
+        cv2.line(stripe_mask, (x, 0), (x, h - 1), 1.0, thickness)
+    else:
+        y0 = int(rng.integers(0, h))
+        y1 = int(rng.integers(0, h))
+        thickness = int(max(2, rng.uniform(0.02, 0.08) * min(h, w)))
+        cv2.line(stripe_mask, (0, y0), (w - 1, y1), 1.0, thickness)
+
+    stripe_mask = cv2.GaussianBlur(stripe_mask, (blur_kernel, blur_kernel), 0)
+    if stripe_mask.max() > 1e-6:
+        stripe_mask /= stripe_mask.max()
+    canvas += float(rng.uniform(0.10, 0.35)) * stripe_mask
 
 
-def output_path_for(
-    in_path: Path,
-    input_root: Path,
-    output_root: Path,
-    recursive: bool,
-) -> Path:
+def random_structured_importance_map(
+    h: int,
+    w: int,
+    rng: np.random.Generator,
+    args: argparse.Namespace,
+) -> np.ndarray:
+    map_raw = np.zeros((h, w), dtype=np.float32)
+    min_hw = float(min(h, w))
+
+    # Random smooth blobs.
+    min_blobs = max(0, int(args.min_blobs))
+    max_blobs = max(min_blobs, int(args.max_blobs))
+    n_blobs = int(rng.integers(min_blobs, max_blobs + 1))
+    for _ in range(n_blobs):
+        cx = float(rng.uniform(0, w - 1))
+        cy = float(rng.uniform(0, h - 1))
+        rmin = max(1.0, args.min_blob_radius_frac * min_hw)
+        rmax = max(rmin + 1.0, args.max_blob_radius_frac * min_hw)
+        rx = float(rng.uniform(rmin, rmax))
+        ry = float(rng.uniform(rmin, rmax))
+        weight = float(rng.uniform(0.25, 1.00))
+        add_gaussian_blob(map_raw, rng, cx, cy, rx, ry, weight)
+
+    # Optional center-prior smooth blob.
+    if rng.uniform(0.0, 1.0) < float(args.center_prob):
+        cx = float(w * (0.5 + rng.uniform(-0.08, 0.08)))
+        cy = float(h * (0.5 + rng.uniform(-0.08, 0.08)))
+        rx = float(rng.uniform(0.18, 0.35) * w)
+        ry = float(rng.uniform(0.18, 0.35) * h)
+        add_gaussian_blob(map_raw, rng, cx, cy, rx, ry, weight=float(rng.uniform(0.35, 0.85)))
+
+    blur_kernel = ensure_odd(args.blur_kernel)
+
+    # Optional smooth patches.
+    if rng.uniform(0.0, 1.0) < float(args.patch_prob):
+        n_patches = int(rng.integers(1, max(2, int(args.max_patches)) + 1))
+        for _ in range(n_patches):
+            add_soft_patch(map_raw, rng, blur_kernel=ensure_odd(blur_kernel // 2))
+
+    # Optional stripe priors.
+    if rng.uniform(0.0, 1.0) < float(args.stripe_prob):
+        n_stripes = int(rng.integers(1, max(2, int(args.max_stripes)) + 1))
+        for _ in range(n_stripes):
+            add_soft_stripe(map_raw, rng, blur_kernel=ensure_odd(blur_kernel // 2))
+
+    # Final smoothing.
+    map_raw = cv2.GaussianBlur(map_raw, (blur_kernel, blur_kernel), 0)
+    map_raw -= map_raw.min()
+    denom = map_raw.max()
+    if denom > 1e-6:
+        map_raw /= denom
+    else:
+        map_raw.fill(0.0)
+
+    # Add low background base and keep range in [0,1].
+    background = float(np.clip(args.background_weight, 0.0, 1.0))
+    out = background + (1.0 - background) * map_raw
+    return np.clip(out, 0.0, 1.0).astype(np.float32)
+
+
+def output_path_for(in_path: Path, input_root: Path, output_root: Path, recursive: bool) -> Path:
     if recursive:
         rel = in_path.relative_to(input_root)
         out_dir = output_root / rel.parent
@@ -417,91 +212,54 @@ def output_path_for(
     return out_dir / f"{in_path.stem}.png"
 
 
-def process_images(args: argparse.Namespace) -> Stats:
-    if np is None:
-        raise RuntimeError("NumPy is required. Please install it with `pip install numpy`.")
-    if cv2 is None:
-        raise RuntimeError(
-            "OpenCV is required for this script. Please install it with "
-            "`pip install opencv-python` (or `opencv-python-headless`)."
-        )
+def main() -> None:
+    args = parse_args()
+    input_dir = Path(args.input_dir).resolve()
+    output_dir = Path(args.output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    images = gather_images(args.input_dir, args.recursive)
-    stats = Stats(total=len(images))
-    if stats.total == 0:
-        raise RuntimeError(f"No supported images found in {args.input_dir}")
+    if not input_dir.exists():
+        raise FileNotFoundError(f"Input directory does not exist: {input_dir}")
 
-    input_root = Path(args.input_dir).resolve()
-    output_root = Path(args.output_dir).resolve()
-    output_root.mkdir(parents=True, exist_ok=True)
+    image_paths = gather_images(input_dir, recursive=args.recursive)
+    stats = Stats(total_images=len(image_paths))
+    if stats.total_images == 0:
+        raise RuntimeError(f"No supported images found in {input_dir}")
 
-    detectors = DetectorStack(dlib_shape_predictor=args.dlib_shape_predictor)
-    status = detectors.status()
-    print(
-        "Detector availability:",
-        f"MediaPipe={status['mediapipe']}, dlib={status['dlib']}, OpenCV={status['opencv']}",
-    )
-    if status["dlib"] is False and args.dlib_shape_predictor:
-        print("dlib predictor was requested but not loaded. Check --dlib-shape-predictor path/dependencies.")
+    print("Generating synthetic random structured importance maps (no face model used).")
+    print(f"Input: {input_dir}")
+    print(f"Output: {output_dir}")
+    print(f"Total images: {stats.total_images}")
+    print(f"Seed: {args.seed}")
 
-    builder = ImportanceMapBuilder(
-        blur_kernel=args.blur_kernel,
-        background_weight=args.background_weight,
-        fallback_center_prior=args.fallback_center_prior,
-    )
+    # Deterministic random stream if seed is fixed.
+    rng = np.random.default_rng(int(args.seed))
 
-    for idx, image_path in enumerate(images, start=1):
+    for idx, image_path in enumerate(image_paths, start=1):
         img = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
         if img is None:
             stats.failed_to_read += 1
             continue
 
-        if args.image_size and args.image_size > 0:
-            img = cv2.resize(img, (args.image_size, args.image_size), interpolation=cv2.INTER_AREA)
+        if args.image_size and int(args.image_size) > 0:
+            img = cv2.resize(img, (int(args.image_size), int(args.image_size)), interpolation=cv2.INTER_AREA)
 
-        importance, method = builder.build(img, detectors)
-        out_u8 = map_to_uint8(importance)
+        h, w = img.shape[:2]
+        imp = random_structured_importance_map(h, w, rng, args)
+        imp_u8 = (imp * 255.0 + 0.5).astype(np.uint8)
 
-        out_path = output_path_for(
-            image_path,
-            input_root=input_root,
-            output_root=output_root,
-            recursive=args.recursive,
-        )
-        cv2.imwrite(str(out_path), out_u8)
+        out_path = output_path_for(image_path, input_root=input_dir, output_root=output_dir, recursive=args.recursive)
+        cv2.imwrite(str(out_path), imp_u8)
+        stats.generated += 1
 
-        if method == "mediapipe":
-            stats.success += 1
-            stats.mediapipe_used += 1
-        elif method == "dlib":
-            stats.success += 1
-            stats.dlib_used += 1
-        elif method == "opencv":
-            stats.success += 1
-            stats.opencv_used += 1
-        else:
-            stats.fallback += 1
+        if args.progress_interval > 0 and (idx % args.progress_interval == 0 or idx == stats.total_images):
+            print(f"Processed {idx}/{stats.total_images}")
 
-        if args.progress_interval > 0 and (idx % args.progress_interval == 0 or idx == stats.total):
-            print(f"Processed {idx}/{stats.total}")
-
-    detectors.close()
-    return stats
-
-
-def main() -> None:
-    args = parse_args()
-    print(f"script start")
-    stats = process_images(args)
     print("Done.")
-    print(f"Total images: {stats.total}")
-    print(f"Successful face detections: {stats.success}")
-    print(f"  - MediaPipe used: {stats.mediapipe_used}")
-    print(f"  - dlib used: {stats.dlib_used}")
-    print(f"  - OpenCV used: {stats.opencv_used}")
-    print(f"Fallback count: {stats.fallback}")
-    print(f"Failed-to-read count: {stats.failed_to_read}")
-    print(f"Output path: {Path(args.output_dir).resolve()}")
+    print(f"Generated maps: {stats.generated}")
+    print(f"Failed-to-read images: {stats.failed_to_read}")
+    print(f"Output path: {output_dir}")
+    print("Note: these importance maps are synthetic random structured priors, not semantic annotations.")
 
 
 if __name__ == "__main__":
