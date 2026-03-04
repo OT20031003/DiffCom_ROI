@@ -206,8 +206,14 @@ class DeepJSCC(NonlinearOperator):
     def __init__(self, config, logger, device):
         self.device = device
         self.config = config
+        self.use_importance = bool(config.djscc.get('use_importance', False))
         self.channel = ChannelWrapper(config, logger, device, rescale=False)
-        self.model = ADJSCC(config.djscc['channel_num'], self.channel, device)
+        self.model = ADJSCC(
+            config.djscc['channel_num'],
+            self.channel,
+            device,
+            use_importance=self.use_importance,
+        )
         state_dict = torch.load(config.djscc['jscc_model_path'], map_location=device)
         # map Encoder to jscc_encoder
         for key in list(state_dict.keys()):
@@ -218,12 +224,15 @@ class DeepJSCC(NonlinearOperator):
                 state_dict[key.replace('Encoder', 'jscc_encoder')] = state_dict.pop(key)
             elif key.startswith('Decoder'):
                 state_dict[key.replace('Decoder', 'jscc_decoder')] = state_dict.pop(key)
-        self.model.load_state_dict(state_dict, strict=True)
+        strict_load = not self.use_importance
+        load_result = self.model.load_state_dict(state_dict, strict=strict_load)
+        if self.use_importance and logger is not None:
+            logger.info(f"DeepJSCC importance-aware load (strict={strict_load}): {load_result}")
         self.model.eval()
 
     @torch.no_grad()
-    def observe_and_transpose(self, x):
-        s = self.encode(x)
+    def observe_and_transpose(self, x, importance_map=None):
+        s = self.encode(x, importance_map=importance_map)
         ofdm_sig, cof_est, cof_gt, channel_usage = self.channel.observe(s, torch.ones_like(s))
         s_hat = self.channel.transpose(ofdm_sig, cof_est)
         x_mse = self.decode(s_hat)
@@ -234,9 +243,9 @@ class DeepJSCC(NonlinearOperator):
                 "cof_gt": cof_gt,
                 "channel_usage": channel_usage}
 
-    def encode(self, data):
+    def encode(self, data, importance_map=None):
         B, C, H, W = data.shape
-        s = self.model.encode(data, given_SNR=self.config.CSNR)
+        s = self.model.encode(data, given_SNR=self.config.CSNR, importance_map=importance_map)
         self.s_shape = s.shape
         # avg_pwr = torch.mean(s ** 2)
         # s = s / torch.sqrt(avg_pwr * 2)

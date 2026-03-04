@@ -4,6 +4,7 @@ from random import choice
 import torch
 import torch.utils.data
 from torch import nn
+import torch.nn.functional as F
 # from torchvision import datasets, transforms
 # from torchvision.utils import save_image
 from torch.autograd import Function
@@ -117,18 +118,92 @@ class AFModule(nn.Module):
         return out
 
 
+class ImportanceAFModule(nn.Module):
+    """
+    Encoder-side attention with implicit unequal protection:
+    - channel gate from global feature + SNR + pooled importance
+    - spatial gate from local feature and importance map
+    """
+
+    def __init__(self, C):
+        super(ImportanceAFModule, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        hidden = max((C + 2) // 16, 1)
+        self.fc1 = nn.Linear(C + 2, hidden)
+        self.relu1 = nn.ReLU()
+        self.fc2 = nn.Linear(hidden, C)
+        self.sigmoid = nn.Sigmoid()
+
+        spatial_hidden = max(C // 4, 16)
+        self.spatial_gate = nn.Sequential(
+            nn.Conv2d(C + 1, spatial_hidden, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(spatial_hidden, 1, kernel_size=3, stride=1, padding=1),
+            nn.Sigmoid(),
+        )
+
+    def _prepare_importance(self, x, importance):
+        b, _, h, w = x.shape
+        if importance is None:
+            return torch.ones((b, 1, h, w), device=x.device, dtype=x.dtype)
+        if importance.dim() == 3:
+            importance = importance.unsqueeze(1)
+        importance = importance.to(device=x.device, dtype=x.dtype)
+        if importance.shape[-2:] != (h, w):
+            importance = F.interpolate(importance, size=(h, w), mode='bilinear', align_corners=False)
+        return importance.clamp(0.0, 1.0)
+
+    def _prepare_snr(self, x, snr):
+        b = x.shape[0]
+        if snr is None:
+            return torch.zeros((b, 1), device=x.device, dtype=x.dtype)
+        if not torch.is_tensor(snr):
+            snr = torch.tensor(snr, device=x.device, dtype=x.dtype)
+        snr = snr.to(device=x.device, dtype=x.dtype)
+        if snr.dim() == 0:
+            snr = snr.view(1, 1).repeat(b, 1)
+        elif snr.dim() == 1:
+            if snr.numel() == b:
+                snr = snr.view(b, 1)
+            elif snr.numel() == 1:
+                snr = snr.view(1, 1).repeat(b, 1)
+            else:
+                raise ValueError(f"Unsupported SNR shape: {snr.shape}")
+        elif snr.dim() == 2 and snr.shape[1] == 1 and snr.shape[0] == b:
+            pass
+        else:
+            raise ValueError(f"Unsupported SNR shape: {snr.shape}")
+        return snr
+
+    def forward(self, x, SNR, importance=None):
+        importance = self._prepare_importance(x, importance)
+        SNR = self._prepare_snr(x, SNR)
+
+        feature_pooling = self.avg_pool(x)
+        b, c, _, _ = feature_pooling.shape
+        imp_pooling = self.avg_pool(importance).reshape(b, 1)
+        context_information = torch.cat((SNR, imp_pooling, feature_pooling.reshape(b, c)), dim=1)
+
+        channel_gate = self.sigmoid(self.fc2(self.relu1(self.fc1(context_information))))
+        spatial_gate = self.spatial_gate(torch.cat((x, importance), dim=1))
+        return x * channel_gate.unsqueeze(2).unsqueeze(3) * spatial_gate
+
+
 class Encoder(nn.Module):
-    def __init__(self, C, device, use_attn=True, activation='prelu'):
+    def __init__(self, C, device, use_attn=True, activation='prelu', use_importance=False):
         super(Encoder, self).__init__()
         self.C = C
+        self.use_attn = use_attn
+        self.use_importance = use_importance
         activation_d = dict(relu='ReLU', elu='ELU', leaky_relu='LeakyReLU', prelu='PReLU')
         self.activation = getattr(nn, activation_d[activation])  # (leaky_relu, relu, elu, prelu)
 
         if use_attn:
-            self.attention1 = AFModule(256)
-            self.attention2 = AFModule(256)
-            self.attention3 = AFModule(256)
-            self.attention4 = AFModule(256)
+            attention_cls = ImportanceAFModule if use_importance else AFModule
+            self.attention1 = attention_cls(256)
+            self.attention2 = attention_cls(256)
+            self.attention3 = attention_cls(256)
+            self.attention4 = attention_cls(256)
 
         # (3,32,32) -> (256,16,16), with implicit padding
         self.conv_block1 = nn.Sequential(
@@ -164,15 +239,31 @@ class Encoder(nn.Module):
             GDN(self.C, device, False),
         )
 
-    def forward(self, x, SNR):
+    def forward(self, x, SNR, importance_map=None):
         x = self.conv_block1(x)
-        x = self.attention1(x, SNR)
+        if self.use_attn:
+            if self.use_importance:
+                x = self.attention1(x, SNR, importance_map)
+            else:
+                x = self.attention1(x, SNR)
         x = self.conv_block2(x)
-        x = self.attention2(x, SNR)
+        if self.use_attn:
+            if self.use_importance:
+                x = self.attention2(x, SNR, importance_map)
+            else:
+                x = self.attention2(x, SNR)
         x = self.conv_block3(x)
-        x = self.attention3(x, SNR)
+        if self.use_attn:
+            if self.use_importance:
+                x = self.attention3(x, SNR, importance_map)
+            else:
+                x = self.attention3(x, SNR)
         x = self.conv_block4(x)
-        x = self.attention4(x, SNR)
+        if self.use_attn:
+            if self.use_importance:
+                x = self.attention4(x, SNR, importance_map)
+            else:
+                x = self.attention4(x, SNR)
         out = self.conv_block5(x)
         return out
 
@@ -249,13 +340,15 @@ class Decoder(nn.Module):
 
 
 class ADJSCC(nn.Module):
-    def __init__(self, C, channel, device):
+    def __init__(self, C, channel, device, use_importance=False, multiple_snr=None):
         super(ADJSCC, self).__init__()
         # if config.logger:
         #     config.logger.info("【Network】: Built ADJSCC model, C={}".format(config.C))
         # self.config = config
         self.device = device
-        self.jscc_encoder = Encoder(C, device, use_attn=True)
+        self.use_importance = use_importance
+        self.multiple_snr = multiple_snr
+        self.jscc_encoder = Encoder(C, device, use_attn=True, use_importance=use_importance)
         self.jscc_decoder = Decoder(C, device, use_attn=True)
         # self.distortion_loss = Distortion(config)
         self.channel = channel
@@ -264,31 +357,43 @@ class ADJSCC(nn.Module):
         noisy_feature = self.channel(feature)
         return noisy_feature
 
-    def forward(self, input_image, given_SNR=None, mode='ADJSCC'):
-        B, C, H, W = input_image.shape
+    def _resolve_snr(self, given_SNR=None):
         if given_SNR is not None:
-            self.channel.chan_param = given_SNR
-        else:
-            # used for training
-            random_SNR = choice(self.config.multiple_snr)
-            self.channel.chan_param = random_SNR
+            return float(given_SNR)
+        if self.multiple_snr is not None and len(self.multiple_snr) > 0:
+            return float(choice(self.multiple_snr))
+        if hasattr(self.channel, 'chan_param'):
+            return float(self.channel.chan_param)
+        return 10.0
+
+    def forward(self, input_image, given_SNR=None, mode='ADJSCC', importance_map=None):
+        B, C, H, W = input_image.shape
+        _ = mode
+        self.channel.chan_param = self._resolve_snr(given_SNR)
 
         SNR = torch.ones([B, 1]).to(self.device) * self.channel.chan_param
-        feature = self.jscc_encoder(input_image, SNR)
-        noisy_feature, _ = self.feature_pass_channel(feature)
+        feature = self.jscc_encoder(
+            input_image, SNR, importance_map=importance_map if self.use_importance else None
+        )
+        channel_output = self.feature_pass_channel(feature)
+        noisy_feature = channel_output[0] if isinstance(channel_output, tuple) else channel_output
+        # Decoder does not consume importance; reconstruction depends only on received latent and SNR.
         recon_image = self.jscc_decoder(noisy_feature, SNR)
         # distortion_loss = self.distortion_loss.forward(input_image, recon_image)
         return recon_image  # , distortion_loss
 
-    def encode(self, input_image, given_SNR=None):
+    def encode(self, input_image, given_SNR=None, importance_map=None):
         B, C, H, W = input_image.shape
-        self.channel.chan_param = given_SNR
+        self.channel.chan_param = self._resolve_snr(given_SNR)
         SNR = torch.ones([B, 1]).to(self.device) * self.channel.chan_param
-        feature = self.jscc_encoder(input_image, SNR)
+        feature = self.jscc_encoder(
+            input_image, SNR, importance_map=importance_map if self.use_importance else None
+        )
         return feature
 
     def decode(self, feature, given_SNR=None):
         B, C, H, W = feature.shape
-        SNR = torch.ones([B, 1]).to(self.device) * given_SNR
+        snr = self._resolve_snr(given_SNR)
+        SNR = torch.ones([B, 1]).to(self.device) * snr
         recon_image = self.jscc_decoder(feature, SNR)
         return recon_image

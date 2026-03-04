@@ -16,14 +16,14 @@ class Channel(nn.Module):
                 channel_type, SNR))
 
     def gaussian_noise_layer(self, input_layer, std):
-        device = input_layer.get_device()
+        device = input_layer.device
         noise_real = torch.normal(mean=0.0, std=std, size=np.shape(input_layer), device=device)
         noise_imag = torch.normal(mean=0.0, std=std, size=np.shape(input_layer), device=device)
         noise = noise_real + 1j * noise_imag
         return input_layer + noise
 
     def rayleigh_noise_layer(self, input_layer, std):
-        device = input_layer.get_device()
+        device = input_layer.device
         # fast rayleigh channel
         noise_real = torch.normal(mean=0.0, std=std, size=np.shape(input_layer), device=device)
         noise_imag = torch.normal(mean=0.0, std=std, size=np.shape(input_layer), device=device)
