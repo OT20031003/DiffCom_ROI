@@ -132,17 +132,17 @@ mkdir -p results/djscc_train_random_imp
 nohup python3 train_djscc.py \
   --train-images-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k \
   --train-importance-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k_importance \
-  --save-dir results/djscc_train_random_imp \
+  --save-dir results/djscc_train_random_imp_01 \
   --channel-num 2 \
   --image-size 256 \
   --batch-size 8 \
-  --epochs 50 \
+  --epochs 5 \
   --lr 1e-4 \
   --snr-range -10 10 \
   --lambda-corr 0.1 \
   --loss-type mse \
   --device cuda \
-  > results/djscc_train_random_imp/train.log 2>&1 &
+  > results/djscc_train_random_imp_01/train.log 2>&1 &
 
 # ログ確認
 tail -f results/djscc_train_random_imp/train.log
@@ -191,10 +191,10 @@ rm -rf results/djscc_test_best
 
 ```bash
 python3 test_djscc.py \
-  --checkpoint results/djscc_train_random_imp/best.pth \
+  --checkpoint results/djscc_train_random_imp_001/best.pth \
   --images-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k \
   --importance-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k_importance \
-  --output-dir results/djscc_test_best_proposed \
+  --output-dir results/djscc_test_best_proposed_001 \
   --channel-num 2 \
   --snr -10 \
   --print-per-image-psnr \
@@ -253,7 +253,7 @@ python3 test_djscc.py \
    --importance-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k_importance \
    --output-dir results/djscc_test_standard \
    --channel-num 2 \
-   --snr 10 \
+   --snr 0 \
    --report-correlation \
    --print-per-image-psnr \
    --print-per-image-lpips \

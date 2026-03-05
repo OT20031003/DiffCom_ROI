@@ -142,7 +142,7 @@ def run_epoch(model, loader, optimizer, device, args, rng, train: bool, epoch: i
                 importance_map=None if args.disable_importance_gating else importance,
             )
             recon_loss = reconstruction_loss(images, recon, use_mse=use_mse)
-            err_map = torch.mean(torch.abs(images - recon)**2, dim=1, keepdim=True)
+            err_map = torch.mean(torch.abs(images - recon), dim=1, keepdim=True)
             corr_loss = pearson_corr_loss_map(importance, err_map)
             total_loss = recon_loss + args.lambda_corr * corr_loss
             if train:
