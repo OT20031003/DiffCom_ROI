@@ -151,11 +151,11 @@ tail -f results/djscc_train_random_imp/train.log
 
 ```bash
 nohup python3 train_djscc.py \
-  --resume results/djscc_train_random_imp/best.pth \
-  --epochs 100 \
+  --resume results/djscc_train_standard/best.pth \
+  --epochs 4 \
   --train-images-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k \
   --train-importance-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k_importance \
-  --save-dir results/djscc_train_random_imp \
+  --save-dir results/djscc_train_standard \
   --channel-num 2 \
   --image-size 256 \
   --batch-size 8 \
@@ -183,21 +183,97 @@ python3 test_djscc.py \
 
 ### 5.6 ADJSCC 評価（画像ごとの指標も表示）
 
+```
+rm -rf results/djscc_test_best
+```
+
 ```bash
 python3 test_djscc.py \
   --checkpoint results/djscc_train_random_imp/best.pth \
   --images-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k \
   --importance-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k_importance \
-  --output-dir results/djscc_test_best \
+  --output-dir results/djscc_test_best_proposed \
   --channel-num 2 \
-  --snr 5 \
+  --snr 0 \
   --print-per-image-psnr \
   --print-per-image-lpips \
   --report-correlation \
   --print-per-image-correlation \
   --device cuda \
-  --num-test-images 10
+  --num-test-images 20 \
+  --importance-threshold 0.5 \
+  --print-per-image-split-mse
 ```
+## 通常のADJSCC (比較用)
+### 学習
+```bash
+nohup python3 train_djscc.py \
+  --train-images-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k \
+  --train-importance-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k_importance \
+  --save-dir results/djscc_train_standard \
+  --channel-num 2 \
+  --image-size 256 \
+  --batch-size 8 \
+  --epochs 6 \
+  --lr 1e-4 \
+  --snr-range -10 10 \
+  --lambda-corr 0 \
+  --disable-importance-gating \
+  --device cuda \
+  > results/djscc_train_standard/train.log 2>&1 &
+```
+### 再開
+```bash
+nohup python3 train_djscc.py \
+  --resume results/djscc_train_standard/best.pth \
+  --epochs 6 \
+  --train-images-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k \
+  --train-importance-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k_importance \
+  --save-dir results/djscc_train_standard \
+  --channel-num 2 \
+  --image-size 256 \
+  --batch-size 8 \
+  --lr 1e-4 \
+  --snr-range -10 10 \
+  --lambda-corr 0 \
+  --disable-importance-gating \
+  --device cuda \
+  > results/djscc_train_standard/resume.log 2>&1 &
+```
+
+### テスト
+```bash
+python3 test_djscc.py \
+   --checkpoint results/djscc_train_standard/best.pth \
+   --images-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k \
+   --importance-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k_importance \
+   --output-dir results/djscc_test_standard \
+   --channel-num 2 \
+   --snr 0 \
+   --report-correlation \
+   --print-per-image-psnr \
+   --print-per-image-lpips \
+   --device cuda \
+   --num-test-images 20 \
+   --print-per-image-split-mse \
+   --disable-importance-gating
+```
+
+---
+
+### 定量評価のサマリーテーブル（論文用ドラフト）
+
+得られた結果を3つのSNR環境（5dB, 0dB, -10dB）で比較表にまとめました。
+
+| SNR | Method | PSNR (dB) | LPIPS ↓ | CORR | MSE ($\geq 0.5$) ↓ | MSE ($< 0.5$) |
+| --- | --- | --- | --- | --- | --- | --- |
+| **5 dB** | Standard | **25.04** | 0.318 | -0.021 | 0.00331 | **0.00353** |
+|  | **Proposed** | 20.96 | **0.308** | **-0.713** | **0.00208** | 0.01086 |
+| **0 dB** | Standard | **23.23** | **0.370** | -0.020 | 0.00491 | **0.00514** |
+|  | **Proposed** | 19.56 | 0.398 | **-0.653** | **0.00324** | 0.01480 |
+| **-10 dB** | Standard | **18.34** | **0.601** | -0.026 | 0.01492 | **0.01524** |
+|  | **Proposed** | 16.61 | 0.643 | **-0.391** | **0.01094** | 0.02722 |
+---
 
 ### 5.7 DiffCom 推論（`configs/diffcom.yaml` 使用）
 

@@ -69,6 +69,14 @@ def parse_args():
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-test-images", type=int, default=None, help="Number of images to test.")
+    
+    # 新しく追加した引数
+    parser.add_argument("--importance-threshold", type=float, default=0.5, help="Threshold for calculating split MSE based on Importance Map.")
+    parser.add_argument(
+        "--print-per-image-split-mse",
+        action="store_true",
+        help="Print split MSE values (above/below threshold) per image.",
+    )
     return parser.parse_args()
 
 
@@ -196,6 +204,7 @@ def main():
     print(f"snr             : {args.snr if args.snr is not None else args.snr_range}")
     print(f"report_corr     : {args.report_correlation}")
     print(f"lpips_enabled   : {not args.disable_lpips}")
+    print(f"imp_threshold   : {args.importance_threshold}")
     print(f"checkpoint_load : {load_result}")
 
     use_mse = args.loss_type == "mse"
@@ -208,6 +217,12 @@ def main():
     corr_sum = 0.0
     corr_count = 0
     image_counter = 0
+
+    # Split MSEを記録するための変数
+    total_high_err_sum = 0.0
+    total_high_pixel_count = 0.0
+    total_low_err_sum = 0.0
+    total_low_pixel_count = 0.0
 
     print_section("Running Inference")
     model.eval()
@@ -241,6 +256,22 @@ def main():
                 psnr=psnr,
                 n=images.size(0),
             )
+
+            # --- 閾値ベースのSplit MSE計算 ---
+            sq_err = (images - recon) ** 2
+            mask_high = (importance >= args.importance_threshold).float()
+            mask_low = (importance < args.importance_threshold).float()
+            
+            # sq_err (B, C, H, W) とチャネル数を合わせるために拡張
+            mask_high_exp = mask_high.expand_as(sq_err)
+            mask_low_exp = mask_low.expand_as(sq_err)
+            
+            total_high_err_sum += (sq_err * mask_high_exp).sum().item()
+            total_high_pixel_count += mask_high_exp.sum().item()
+            
+            total_low_err_sum += (sq_err * mask_low_exp).sum().item()
+            total_low_pixel_count += mask_low_exp.sum().item()
+            # ---------------------------------
 
             corr_vals = [None] * len(names)
             lpips_vals = None
@@ -278,7 +309,8 @@ def main():
                 combined = torch.cat([recon[i], imp_i, images_clamped[i]], dim=2)
                 save_image(combined, save_path)
 
-                if args.print_per_image_psnr or args.print_per_image_lpips or args.print_per_image_correlation:
+                if (args.print_per_image_psnr or args.print_per_image_lpips or 
+                    args.print_per_image_correlation or args.print_per_image_split_mse):
                     parts = [f"[{image_counter}/{len(dataset)}] {name}"]
                     if args.print_per_image_psnr:
                         parts.append(f"PSNR={float(psnr_vec[i].item()):.4f}dB")
@@ -286,6 +318,16 @@ def main():
                         parts.append(f"LPIPS={float(lpips_vals[i].item()):.6f}")
                     if args.print_per_image_correlation and corr_vals[i] is not None:
                         parts.append(f"CORR={float(corr_vals[i]):.6f}")
+                    if args.print_per_image_split_mse:
+                        sq_err_i = sq_err[i]
+                        mh_i = mask_high_exp[i]
+                        ml_i = mask_low_exp[i]
+                        h_cnt = mh_i.sum().item()
+                        l_cnt = ml_i.sum().item()
+                        mse_h = (sq_err_i * mh_i).sum().item() / h_cnt if h_cnt > 0 else 0.0
+                        mse_l = (sq_err_i * ml_i).sum().item() / l_cnt if l_cnt > 0 else 0.0
+                        parts.append(f"MSE(>={args.importance_threshold})={mse_h:.6f}")
+                        parts.append(f"MSE(<{args.importance_threshold})={mse_l:.6f}")
                     print(" | ".join(parts))
 
     stats = averages.compute()
@@ -293,6 +335,15 @@ def main():
     print(f"avg_loss        : {stats['loss']:.6f}")
     print(f"avg_recon_loss  : {stats['recon_loss']:.6f}")
     print(f"avg_psnr        : {stats['psnr']:.4f} dB")
+    
+    # 全体でのSplit MSEの出力をログに追加
+    if total_high_pixel_count > 0:
+        avg_high_mse = total_high_err_sum / total_high_pixel_count
+        print(f"avg_mse(>={args.importance_threshold})".ljust(16) + f": {avg_high_mse:.6f}")
+    if total_low_pixel_count > 0:
+        avg_low_mse = total_low_err_sum / total_low_pixel_count
+        print(f"avg_mse(<{args.importance_threshold})".ljust(16) + f": {avg_low_mse:.6f}")
+        
     if lpips_metric is not None:
         avg_lpips = lpips_sum / max(lpips_count, 1)
         print(f"avg_lpips       : {avg_lpips:.6f} (samples={lpips_count})")
