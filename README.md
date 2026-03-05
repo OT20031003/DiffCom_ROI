@@ -120,7 +120,7 @@ python3 train_djscc.py \
   --lr 1e-4 \
   --snr-range -10 10 \
   --lambda-corr 0.1 \
-  --loss-type l1 \
+  --loss-type mse \
   --device cuda
 ```
 
@@ -140,6 +140,7 @@ nohup python3 train_djscc.py \
   --lr 1e-4 \
   --snr-range -10 10 \
   --lambda-corr 0.1 \
+  --loss-type mse \
   --device cuda \
   > results/djscc_train_random_imp/train.log 2>&1 &
 
@@ -162,6 +163,7 @@ nohup python3 train_djscc.py \
   --lr 1e-4 \
   --snr-range -10 10 \
   --lambda-corr 0.1 \
+  --loss-type mse \
   --device cuda \
   > results/djscc_train_random_imp/resume.log 2>&1 &
 ```
@@ -220,6 +222,7 @@ nohup python3 train_djscc.py \
   --lambda-corr 0 \
   --disable-importance-gating \
   --device cuda \
+  --loss-type mse \
   > results/djscc_train_standard/train.log 2>&1 &
 ```
 ### 再開
@@ -238,6 +241,7 @@ nohup python3 train_djscc.py \
   --lambda-corr 0 \
   --disable-importance-gating \
   --device cuda \
+  --loss-type mse \
   > results/djscc_train_standard/resume.log 2>&1 &
 ```
 
