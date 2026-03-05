@@ -194,7 +194,7 @@ python3 test_djscc.py \
   --importance-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k_importance \
   --output-dir results/djscc_test_best_proposed \
   --channel-num 2 \
-  --snr 0 \
+  --snr -6 \
   --print-per-image-psnr \
   --print-per-image-lpips \
   --report-correlation \
@@ -249,7 +249,7 @@ python3 test_djscc.py \
    --importance-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k_importance \
    --output-dir results/djscc_test_standard \
    --channel-num 2 \
-   --snr 0 \
+   --snr -6 \
    --report-correlation \
    --print-per-image-psnr \
    --print-per-image-lpips \
@@ -259,21 +259,19 @@ python3 test_djscc.py \
    --disable-importance-gating
 ```
 
----
 
-### 定量評価のサマリーテーブル（論文用ドラフト）
-
-得られた結果を3つのSNR環境（5dB, 0dB, -10dB）で比較表にまとめました。
-
-| SNR | Method | PSNR (dB) | LPIPS ↓ | CORR | MSE ($\geq 0.5$) ↓ | MSE ($< 0.5$) |
+| SNR | Method | PSNR (dB) ↑ | LPIPS ↓ | CORR (強い負が優) | MSE ($\geq 0.5$) ↓ | MSE ($< 0.5$) |
 | --- | --- | --- | --- | --- | --- | --- |
-| **5 dB** | Standard | **25.04** | 0.318 | -0.021 | 0.00331 | **0.00353** |
-|  | **Proposed** | 20.96 | **0.308** | **-0.713** | **0.00208** | 0.01086 |
-| **0 dB** | Standard | **23.23** | **0.370** | -0.020 | 0.00491 | **0.00514** |
-|  | **Proposed** | 19.56 | 0.398 | **-0.653** | **0.00324** | 0.01480 |
-| **-10 dB** | Standard | **18.34** | **0.601** | -0.026 | 0.01492 | **0.01524** |
-|  | **Proposed** | 16.61 | 0.643 | **-0.391** | **0.01094** | 0.02722 |
----
+| **10 dB** | Standard | **27.28** | **0.192** | -0.014 | 0.00198 | **0.00201** |
+|  | **Proposed** | 21.85 | 0.261 | **-0.737** | **0.00159** | 0.00892 |
+| **5 dB** | Standard | **26.15** | **0.228** | -0.008 | 0.00254 | **0.00259** |
+|  | **Proposed** | 20.96 | 0.308 | **-0.714** | **0.00208** | 0.01087 |
+| **0 dB** | Standard | **24.03** | **0.310** | 0.002 | 0.00414 | **0.00415** |
+|  | **Proposed** | 19.57 | 0.399 | **-0.653** | **0.00325** | 0.01480 |
+| **-5 dB** | Standard | **21.44** | **0.453** | 0.002 | 0.00762 | **0.00748** |
+|  | **Proposed** | 18.10 | 0.535 | **-0.527** | **0.00589** | 0.02015 |
+| **-10 dB** | Standard | **18.70** | **0.606** | -0.010 | 0.01395 | **0.01406** |
+|  | **Proposed** | 16.62 | 0.643 | **-0.391** | **0.01094** | 0.02722 |
 
 ### 5.7 DiffCom 推論（`configs/diffcom.yaml` 使用）
 
