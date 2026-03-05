@@ -1,6 +1,7 @@
 import argparse
 import os
 import random
+import math
 from typing import Optional, Sequence, Tuple
 
 import torch
@@ -326,8 +327,14 @@ def main():
                         l_cnt = ml_i.sum().item()
                         mse_h = (sq_err_i * mh_i).sum().item() / h_cnt if h_cnt > 0 else 0.0
                         mse_l = (sq_err_i * ml_i).sum().item() / l_cnt if l_cnt > 0 else 0.0
+                        
+                        psnr_h = -10 * math.log10(mse_h) if mse_h > 0 else float('inf')
+                        psnr_l = -10 * math.log10(mse_l) if mse_l > 0 else float('inf')
+                        
                         parts.append(f"MSE(>={args.importance_threshold})={mse_h:.6f}")
                         parts.append(f"MSE(<{args.importance_threshold})={mse_l:.6f}")
+                        parts.append(f"PSNR(>={args.importance_threshold})={psnr_h:.2f}dB")
+                        parts.append(f"PSNR(<{args.importance_threshold})={psnr_l:.2f}dB")
                     print(" | ".join(parts))
 
     stats = averages.compute()
@@ -336,13 +343,18 @@ def main():
     print(f"avg_recon_loss  : {stats['recon_loss']:.6f}")
     print(f"avg_psnr        : {stats['psnr']:.4f} dB")
     
-    # 全体でのSplit MSEの出力をログに追加
+    # 全体でのSplit MSEとPSNRの出力をログに追加
     if total_high_pixel_count > 0:
         avg_high_mse = total_high_err_sum / total_high_pixel_count
+        avg_high_psnr = -10 * math.log10(avg_high_mse) if avg_high_mse > 0 else float('inf')
         print(f"avg_mse(>={args.importance_threshold})".ljust(16) + f": {avg_high_mse:.6f}")
+        print(f"avg_psnr(>={args.importance_threshold})".ljust(16) + f": {avg_high_psnr:.4f} dB")
+        
     if total_low_pixel_count > 0:
         avg_low_mse = total_low_err_sum / total_low_pixel_count
+        avg_low_psnr = -10 * math.log10(avg_low_mse) if avg_low_mse > 0 else float('inf')
         print(f"avg_mse(<{args.importance_threshold})".ljust(16) + f": {avg_low_mse:.6f}")
+        print(f"avg_psnr(<{args.importance_threshold})".ljust(16) + f": {avg_low_psnr:.4f} dB")
         
     if lpips_metric is not None:
         avg_lpips = lpips_sum / max(lpips_count, 1)

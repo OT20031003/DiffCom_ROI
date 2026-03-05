@@ -194,7 +194,7 @@ python3 test_djscc.py \
   --importance-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k_importance \
   --output-dir results/djscc_test_best_proposed \
   --channel-num 2 \
-  --snr -6 \
+  --snr -10 \
   --print-per-image-psnr \
   --print-per-image-lpips \
   --report-correlation \
@@ -249,7 +249,7 @@ python3 test_djscc.py \
    --importance-dir /mnt/d/WSL_Work/diffcom/testsets/ffhq_train_70k_importance \
    --output-dir results/djscc_test_standard \
    --channel-num 2 \
-   --snr -6 \
+   --snr 10 \
    --report-correlation \
    --print-per-image-psnr \
    --print-per-image-lpips \
